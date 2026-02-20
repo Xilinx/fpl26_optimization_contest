@@ -1,7 +1,8 @@
 # Makefile for FPGA Design Optimization Agent
 
 # Configuration
-PYTHON := python3
+VENV_DIR := .venv
+PYTHON := $(VENV_DIR)/bin/python
 PIP := $(PYTHON) -m pip
 
 # Vivado executable - can be overridden with: make setup VIVADO_EXEC=/path/to/vivado
@@ -87,7 +88,13 @@ setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[1/5] Installing Python dependencies...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[1/5] Creating virtual environment and installing Python dependencies...$(COLOR_RESET)\n"
+	@if [ ! -d "$(VENV_DIR)" ]; then \
+		python3 -m venv $(VENV_DIR); \
+		printf "$(COLOR_GREEN)✓ Virtual environment created at $(VENV_DIR)/$(COLOR_RESET)\n"; \
+	else \
+		printf "$(COLOR_GREEN)✓ Virtual environment already exists$(COLOR_RESET)\n"; \
+	fi
 	$(PIP) install -r requirements.txt
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
 	@echo ""
@@ -183,6 +190,10 @@ setup:
 	@echo "  1. If Java was found in Vivado, set JAVA_HOME as shown above"
 	@echo "  2. Run the optimizer:"
 	@echo "     make run_optimizer DCP=$(EXAMPLE_DCP_1)"
+	@echo ""
+	@echo "Note: A Python virtual environment was created at $(VENV_DIR)/"
+	@echo "  'make' targets use it automatically."
+	@echo "  To run scripts directly, activate it first: source $(VENV_DIR)/bin/activate"
 	@echo ""
 	@echo "Output will be in:"
 	@echo "  - Optimized DCP: <input_name>_optimized-<timestamp>.dcp"
@@ -318,4 +329,9 @@ veryclean: clean
 	@# Remove example DCPs
 	@rm -f $(EXAMPLE_DCP_1) $(EXAMPLE_DCP_2)
 	@echo "Removed example DCPs"
+	@# Remove virtual environment
+	@if [ -d "$(VENV_DIR)" ]; then \
+		rm -rf $(VENV_DIR); \
+		echo "Removed virtual environment ($(VENV_DIR)/)"; \
+	fi
 	@printf "$(COLOR_GREEN)✓ Deep clean complete$(COLOR_RESET)\n"
