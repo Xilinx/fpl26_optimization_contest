@@ -1,0 +1,13 @@
+# FPGA Design Optimization Agent Dependencies
+
+# Core dependencies
+mcp>=1.0.0
+
+# OpenAI client (only needed for full agent mode using OpenRouter, not test mode)
+openai>=1.0.0
+
+# RapidWright MCP dependencies
+rapidwright>=2025.2.0
+
+# Vivado MCP dependencies (pexpect for process control)
+pexpect>=4.8.0

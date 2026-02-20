@@ -1,0 +1,52 @@
+<!--
+Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+Portions of this file consist of AI-generated content.
+SPDX-License-Identifier: Apache 2.0
+-->
+<!doctype html>
+<html lang="{{ site.lang | default: "en-US" }}">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+
+{% seo %}
+    <link rel="stylesheet" href="{{ '/assets/css/style.css?v=' | append: site.github.build_revision | relative_url }}">
+    <script src="{{ '/assets/js/scale.fix.js' | relative_url }}"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+    <!--[if lt IE 9]>
+    <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    {% include head-custom.html %}
+  </head>
+  <body>
+    <div class="wrapper">
+      <header>
+        <h3 class="header" style="color:white">{{ site.title | default: site.github.repository_name }}</h3>
+        <!--p class="header">{{ site.description | default: site.github.project_tagline }}</p-->
+
+        <ul>
+          <li><a class="listedpages" href="index.html">Home</a></li>
+          <li><a class="listedpages" href="details.html">Contest Details</a></li>
+          <li><a class="listedpages" href="runtime.html">Eval. Environment</a></li>
+          <li><a class="listedpages" href="alpha_submission.html">Alpha Submission</a></li>
+          <li><a class="listedpages" href="beta_submission.html">Beta Submission</a></li>
+          <li><a class="listedpages" href="final_submission.html">Final Submission</a></li>
+          <li><a class="listedpages" href="benchmarks.html">Benchmarks</a></li>
+          <li><a class="listedpages" href="score.html">Scoring Criteria</a></li>
+          <li><a class="listedpages" href="FAQ.html">FAQ</a></li>
+          <li><a class="listedpages" href="https://github.com/Xilinx/fpl26_optimization_contest">GitHub Repo</a></li>
+          <li><a class="listedpages" href="contact.html">Contact</a></li>
+        </ul>
+
+        <p><i>Sponsored by<img src="AMD_E_Wh_RGB.jpg" width="78" height="30">; contest hosted at the <u><a href="https://2026.fpl.org/">FPL'26 conference</a></u>.</i></p>
+
+        <p><small>Hosted on <a href="https://pages.github.com">GitHub Pages</a> using the Dinky theme</small></p>
+      </header>
+
+      <section>
+        {{ content }}
+      </section>
+    </div>
+    <!--[if !IE]><script>fixScale(document);</script><![endif]-->
+  </body>
+</html>

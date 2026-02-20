@@ -1,0 +1,121 @@
+---
+---
+
+/*
+ * Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ * SPDX-License-Identifier: Apache 2.0
+ */
+
+// Override Dinky theme colors from red to orange (#DD652C)
+$orange: #DD652C;
+$orange-light: #E88B5E;
+$orange-dark: #B85424;
+
+@import "{{ site.theme }}";
+
+// Override link colors
+a {
+  color: $orange;
+  
+  &:hover {
+    color: $orange-dark;
+  }
+}
+
+// Override header styles
+header {
+  h1 {
+    color: $orange;
+  }
+  
+  .downloads {
+    li {
+      background: $orange;
+      
+      &:hover {
+        background: $orange-dark;
+      }
+    }
+  }
+}
+
+// Override button styles
+.button {
+  background: $orange;
+  
+  &:hover {
+    background: $orange-dark;
+  }
+}
+
+// Override code block accent colors
+code {
+  border-color: $orange-light;
+}
+
+// Override table header colors
+th {
+  background: $orange;
+}
+
+// Override navigation elements
+nav {
+  a {
+    color: $orange;
+    
+    &:hover {
+      color: $orange-dark;
+    }
+  }
+}
+
+// Override sidebar navigation buttons
+header {
+  ul {
+    li {
+      // Override the button background and borders
+      background: linear-gradient(to bottom, lighten($orange, 5%), $orange) !important;
+      border: 1px solid $orange-dark !important;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 1px 2px rgba(0,0,0,0.15) !important;
+      
+      &:hover {
+        background: linear-gradient(to bottom, $orange, $orange-dark) !important;
+      }
+      
+      // Target all links in sidebar (including .listedpages)
+      a, a.listedpages {
+        background: none !important;
+        border: none !important;
+        color: white !important;
+        
+        &:hover {
+          background: none !important;
+          color: white !important;
+        }
+        
+        &:active {
+          color: rgba(255,255,255,0.9) !important;
+        }
+      }
+    }
+  }
+}
+
+// Override any remaining red elements
+.highlight {
+  border-color: $orange-light;
+}
+
+blockquote {
+  border-left-color: $orange;
+}
+
+// Override selection color
+::selection {
+  background: $orange-light;
+}
+
+::-moz-selection {
+  background: $orange-light;
+}
