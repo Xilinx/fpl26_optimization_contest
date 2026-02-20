@@ -91,7 +91,8 @@ make setup
 ```
 
 The `make setup` command will:
-- Install Python dependencies from `requirements.txt`
+- Create a Python virtual environment at `.venv/`
+- Install Python dependencies from `requirements.txt` into the virtual environment
 - Check if Vivado is available (and provide instructions if not)
 - Check for Java, or locate Java from the Vivado installation
 - Download example DCPs: `demo_corundum_25g_misses_timing.dcp` and `logicnets_jscl.dcp`
@@ -101,6 +102,10 @@ The `make setup` command will:
 If you prefer not to use the Makefile:
 
 ```bash
+# Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
 # Install Python dependencies
 pip install -r requirements.txt
 
@@ -167,7 +172,7 @@ The Makefile will:
 | `make setup` | Install dependencies, check tools, download example DCPs |
 | `make run_optimizer DCP=<file>` | Run optimizer on specified DCP file (auto-generates output name) |
 | `make clean` | Remove run directories and .Xil directories (preserves optimized DCPs) |
-| `make veryclean` | Deep clean including example DCPs and Python cache |
+| `make veryclean` | Deep clean including example DCPs, Python cache, and virtual environment |
 
 ### Test Mode (No LLM Required)
 
@@ -678,7 +683,10 @@ Run dir:     /path/to/dcp_optimizer_run-20260119_143022
 
 ### Using Python Directly
 
+When running scripts outside of `make`, activate the virtual environment first:
+
 ```
+$ source .venv/bin/activate
 $ python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
 
 FPGA Design Optimization - TEST MODE
