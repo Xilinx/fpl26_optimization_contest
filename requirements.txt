@@ -7,7 +7,7 @@ mcp>=1.0.0
 openai>=1.0.0
 
 # RapidWright MCP dependencies
-rapidwright>=2025.2.0
+rapidwright>=2025.2.1
 
 # Vivado MCP dependencies (pexpect for process control)
 pexpect>=4.8.0
