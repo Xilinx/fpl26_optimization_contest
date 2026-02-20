@@ -66,7 +66,7 @@ See the [Running the Optimizer](#running-the-optimizer) section for more details
 
 - **Python 3.8+**
 - **Java 11+** (for RapidWright - can be auto-detected from Vivado)
-- **AMD/Xilinx Vivado** (2025.2)
+- **AMD/Xilinx Vivado** (2025.1)
   - Vivado must be on your PATH, or you can set the `VIVADO_EXEC` environment variable
 - **OpenRouter API key** (for LLM access, optional for test mode)
 
