@@ -180,13 +180,13 @@ Test mode runs a deterministic optimization flow without using an LLM, useful fo
 
 ```bash
 # Corundum: High fanout optimization flow
-python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
+python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
 
 # LogicNets: Pblock optimization flow
-python dcp_optimizer.py logicnets_jscl.dcp --test
+python3 dcp_optimizer.py logicnets_jscl.dcp --test
 
 # Or specify custom output name
-python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --output optimized_output.dcp --test
+python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --output optimized_output.dcp --test
 ```
 
 **Note:** Test mode only works with the two example DCPs. For other designs, use the full agent mode (LLM-guided) which can analyze the design and select the appropriate optimization strategy.
@@ -214,11 +214,11 @@ For `logicnets_jscl.dcp`, the test mode:
 
 ```bash
 # Optimize with up to 3 high-fanout nets (Corundum only, default is 5)
-python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
+python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
 
 # Enable debug mode (verbose logging, preserve all files)
-python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --debug
-python dcp_optimizer.py logicnets_jscl.dcp --test --debug
+python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --debug
+python3 dcp_optimizer.py logicnets_jscl.dcp --test --debug
 ```
 
 ### Full Agent Mode (Requires LLM)
@@ -228,13 +228,13 @@ In full agent mode, an LLM guides the optimization process:
 ```bash
 # Using environment variable for API key (output name auto-generated)
 export OPENROUTER_API_KEY="your-openrouter-api-key"
-python dcp_optimizer.py input.dcp
+python3 dcp_optimizer.py input.dcp
 
 # Or specify API key and custom output name
-python dcp_optimizer.py input.dcp --output output.dcp --api-key "your-key"
+python3 dcp_optimizer.py input.dcp --output output.dcp --api-key "your-key"
 
 # Use a different model (default: x-ai/grok-4.1-fast)
-python dcp_optimizer.py input.dcp --model anthropic/claude-sonnet-4
+python3 dcp_optimizer.py input.dcp --model anthropic/claude-sonnet-4
 ```
 
 ### Command Line Options
@@ -269,23 +269,23 @@ After running `dcp_optimizer.py`, you should validate that the optimized design 
 
 ```bash
 # Basic validation with 10,000 test vectors (default)
-python validate_dcps.py golden.dcp optimized.dcp
+python3 validate_dcps.py golden.dcp optimized.dcp
 
 # More thorough validation with 100,000 vectors
-python validate_dcps.py golden.dcp optimized.dcp --vectors 100000
+python3 validate_dcps.py golden.dcp optimized.dcp --vectors 100000
 
 # Enable debug logging
-python validate_dcps.py golden.dcp optimized.dcp --debug
+python3 validate_dcps.py golden.dcp optimized.dcp --debug
 ```
 
 ### Example
 
 ```bash
 # First, optimize a design
-python dcp_optimizer.py logicnets_jscl.dcp --output logicnets_jscl_optimized.dcp
+python3 dcp_optimizer.py logicnets_jscl.dcp --output logicnets_jscl_optimized.dcp
 
 # Then validate the optimized design
-python validate_dcps.py logicnets_jscl.dcp logicnets_jscl_optimized.dcp
+python3 validate_dcps.py logicnets_jscl.dcp logicnets_jscl_optimized.dcp
 
 # Output:
 # ======================================================================
@@ -435,10 +435,10 @@ The server:
 ```bash
 # Method 1: Export in your shell (persists for session)
 export VIVADO_EXEC=/path/to/Vivado/2025.2/bin/vivado
-python dcp_optimizer.py input.dcp --test
+python3 dcp_optimizer.py input.dcp --test
 
 # Method 2: One-line with command
-VIVADO_EXEC=/path/to/vivado python dcp_optimizer.py input.dcp --test
+VIVADO_EXEC=/path/to/vivado python3 dcp_optimizer.py input.dcp --test
 
 # Method 3: Through Makefile
 make run_optimizer DCP=input.dcp VIVADO_EXEC=/path/to/vivado
@@ -679,7 +679,7 @@ Run dir:     /path/to/dcp_optimizer_run-20260119_143022
 ### Using Python Directly
 
 ```
-$ python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
+$ python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
 
 FPGA Design Optimization - TEST MODE
 =====================================
@@ -741,7 +741,7 @@ Nets optimized: 5/5
 Enable debug mode for verbose logging:
 
 ```bash
-python dcp_optimizer.py input.dcp --debug
+python3 dcp_optimizer.py input.dcp --debug
 ```
 
 This will:
