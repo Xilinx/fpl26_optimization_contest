@@ -76,8 +76,8 @@ The easiest way to set up the project is using the provided Makefile:
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd fpl26_opt_competition
+git clone https://github.com/Xilinx/fpl26_optimization_contest.git
+cd fpl26_optimization_contest
 
 # Run setup (installs dependencies, checks Vivado/Java, downloads example DCPs)
 make setup
