@@ -9,6 +9,29 @@ Contest website can be found here: https://xilinx.github.io/fpl26_optimization_c
 
 An example LLM-powered autonomous agent that optimizes FPGA designs for timing using RapidWright and Vivado optimizations and tools via MCP (Model Context Protocol) servers.
 
+## Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+- [Running the Optimizer](#running-the-optimizer)
+  - [Using the Makefile](#using-the-makefile-recommended)
+  - [Test Mode](#test-mode-no-llm-required)
+  - [Full Agent Mode](#full-agent-mode-requires-llm)
+  - [Command Line Options](#command-line-options)
+- [Validating Optimized Designs](#validating-optimized-designs)
+- [VivadoMCP Server](#vivadomcp-server)
+- [RapidWrightMCP Server](#rapidwrightmcp-server)
+- [Optimization Strategies](#optimization-strategies)
+- [Optimization Workflow](#optimization-workflow)
+- [Example Session](#example-session)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [License](#license)
+- [Resources](#resources)
+
 ## Overview
 
 This project provides an intelligent agent that:
