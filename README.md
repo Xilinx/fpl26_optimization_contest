@@ -83,10 +83,10 @@ cd fpl26_optimization_contest
 make setup
 
 # If Vivado is not on your PATH, specify it when running make:
-make setup VIVADO_EXEC=/path/to/Vivado/2025.2/bin/vivado
+make setup VIVADO_EXEC=/path/to/Vivado/2025.1/bin/vivado
 
 # Or set VIVADO_EXEC as an environment variable:
-export VIVADO_EXEC=/path/to/Vivado/2025.2/bin/vivado
+export VIVADO_EXEC=/path/to/Vivado/2025.1/bin/vivado
 make setup
 ```
 
@@ -434,7 +434,7 @@ The server:
 **Setting VIVADO_EXEC**: You can set this variable in multiple ways:
 ```bash
 # Method 1: Export in your shell (persists for session)
-export VIVADO_EXEC=/path/to/Vivado/2025.2/bin/vivado
+export VIVADO_EXEC=/path/to/Vivado/2025.1/bin/vivado
 python3 dcp_optimizer.py input.dcp --test
 
 # Method 2: One-line with command
@@ -651,8 +651,8 @@ $ make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
 ✓ Python dependencies installed
 
 [2/5] Checking Vivado...
-✓ Vivado found: /proj/xbuilds/2025.2_released/installs/lin64/2025.2/Vivado/bin/vivado
-vivado v2025.2 (64-bit)
+✓ Vivado found: /opt/Xilinx/2025.1/Vivado/bin/vivado
+vivado v2025.1 (64-bit)
 
 [3/5] Checking Java...
 ✓ Java found: /home/user/tools/jdk-17.0.7+7/bin/java
@@ -773,7 +773,7 @@ Files/directories removed by `make clean`:
 ## Project Structure
 
 ```
-fpl26_opt_competition/
+fpl26_optimization_contest/
 ├── Makefile                  # Build automation (setup, run, clean)
 ├── dcp_optimizer.py          # Main optimization agent
 ├── requirements.txt          # Python dependencies
