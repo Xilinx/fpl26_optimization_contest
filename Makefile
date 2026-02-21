@@ -46,7 +46,7 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup run_optimizer validate validate_demo clean veryclean help
+.PHONY: setup run_optimizer validate validate_demo run-submission clean veryclean help
 
 # Default target
 help:
