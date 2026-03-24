@@ -36,7 +36,8 @@ def main():
         print("\n❌ ERROR: Failed to initialize RapidWright.")
         print("Please ensure:")
         print("  - Java 11+ is installed: java -version")
-        print("  - RapidWright is installed: pip3 install rapidwright")
+        print("  - RapidWright is built: make build-rapidwright (from repo root)")
+        print("  - RAPIDWRIGHT_PATH is set: echo $RAPIDWRIGHT_PATH")
         return 1
     
     # Test 2: Get supported devices

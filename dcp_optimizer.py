@@ -198,11 +198,17 @@ class DCPOptimizerBase:
                 "--mcp-log", str(rapidwright_mcp_log)
             ])
         
+        env = {**os.environ}
+        rapidwright_submodule = script_dir / "RapidWright"
+        if rapidwright_submodule.is_dir() and "RAPIDWRIGHT_PATH" not in env:
+            env["RAPIDWRIGHT_PATH"] = str(rapidwright_submodule)
+            env["CLASSPATH"] = f"{rapidwright_submodule}/bin:{rapidwright_submodule}/jars/*"
+        
         rapidwright_config = {
             "command": sys.executable,
             "args": rapidwright_args,
             "cwd": str(self.run_dir),
-            "env": {**os.environ}
+            "env": env
         }
         
         # Vivado MCP server config

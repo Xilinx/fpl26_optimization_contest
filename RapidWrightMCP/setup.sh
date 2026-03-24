@@ -156,11 +156,39 @@ echo "Installing Python dependencies..."
 echo "This will install: mcp, rapidwright (includes JPype and RapidWright Java libraries)"
 "$PYTHON_EXE" -m pip install -r requirements.txt
 
+# Set up RapidWright submodule environment variables
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+RAPIDWRIGHT_PATH="$REPO_ROOT/RapidWright"
+
+echo ""
+echo "Checking RapidWright submodule..."
+if [ -d "$RAPIDWRIGHT_PATH" ] && [ -f "$RAPIDWRIGHT_PATH/gradlew" ]; then
+    echo "✓ RapidWright submodule found at: $RAPIDWRIGHT_PATH"
+    
+    # Check if RapidWright has been compiled (bin/ exists in source, so check build output)
+    if [ -f "$RAPIDWRIGHT_PATH/build/libs/main.jar" ]; then
+        echo "✓ RapidWright is compiled"
+    else
+        echo "⚠ RapidWright has not been compiled yet"
+        echo "  Run: make build-rapidwright  (from the repo root)"
+    fi
+    
+    export RAPIDWRIGHT_PATH
+    export CLASSPATH="$RAPIDWRIGHT_PATH/bin:$RAPIDWRIGHT_PATH/jars/*"
+    echo "  Set RAPIDWRIGHT_PATH=$RAPIDWRIGHT_PATH"
+    echo "  Set CLASSPATH=$CLASSPATH"
+else
+    echo "⚠ RapidWright submodule not found at: $RAPIDWRIGHT_PATH"
+    echo "  Run: git submodule update --init RapidWright"
+    echo "  Then: make build-rapidwright"
+fi
+
 echo ""
 echo "=== Setup Complete! ==="
 echo ""
 echo "✓ Python dependencies installed"
-echo "✓ RapidWright installed from pip (includes Java libraries)"
+echo "✓ RapidWright source at: $RAPIDWRIGHT_PATH"
 echo ""
 echo "To test the server:"
 echo "  $PYTHON_EXE test_server.py"
@@ -171,20 +199,24 @@ echo ""
 echo "To use with Cursor/Claude Desktop, add to your MCP config:"
 echo ""
 
-# Always include JAVA_HOME in the MCP config (JPype needs this)
+# Include JAVA_HOME and RAPIDWRIGHT_PATH/CLASSPATH in the MCP config
 echo '{
   "mcpServers": {
     "rapidwright": {
       "command": "'$PYTHON_EXE'",
       "args": ["'$(pwd)'/server.py"],
       "env": {
-        "JAVA_HOME": "'$JAVA_HOME'"
+        "JAVA_HOME": "'$JAVA_HOME'",
+        "RAPIDWRIGHT_PATH": "'$RAPIDWRIGHT_PATH'",
+        "CLASSPATH": "'$RAPIDWRIGHT_PATH'/bin:'$RAPIDWRIGHT_PATH'/jars/*"
       }
     }
   }
 }'
 
 echo ""
-echo "Note: No RAPIDWRIGHT_PATH needed - everything is managed by pip!"
+echo "IMPORTANT: RAPIDWRIGHT_PATH and CLASSPATH must be set so the pip"
+echo "  rapidwright package uses the local RapidWright source instead of"
+echo "  the pip-bundled standalone JAR."
 echo ""
 

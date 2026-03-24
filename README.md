@@ -98,11 +98,11 @@ See the [Running the Optimizer](#running-the-optimizer) section for more details
 The easiest way to set up the project is using the provided Makefile:
 
 ```bash
-# Clone the repository
-git clone https://github.com/Xilinx/fpl26_optimization_contest.git
+# Clone the repository (--recursive initializes the RapidWright submodule)
+git clone --recursive https://github.com/Xilinx/fpl26_optimization_contest.git
 cd fpl26_optimization_contest
 
-# Run setup (installs dependencies, checks Vivado/Java, downloads example DCPs)
+# Run setup (installs deps, builds RapidWright, checks Vivado/Java, downloads example DCPs)
 make setup
 
 # If Vivado is not on your PATH, specify it when running make:
@@ -117,6 +117,7 @@ The `make setup` command will:
 - Install Python dependencies from `requirements.txt`
 - Check if Vivado is available (and provide instructions if not)
 - Check for Java, or locate Java from the Vivado installation
+- Build RapidWright from the `RapidWright/` git submodule source
 - Download example DCPs: `demo_corundum_25g_misses_timing.dcp` and `logicnets_jscl.dcp`
 
 #### Manual Installation
@@ -124,8 +125,18 @@ The `make setup` command will:
 If you prefer not to use the Makefile:
 
 ```bash
+# Initialize the RapidWright git submodule
+git submodule update --init RapidWright
+
 # Install Python dependencies
 pip install -r requirements.txt
+
+# Build RapidWright from source
+cd RapidWright && ./gradlew compileJava && cd ..
+
+# Set environment variables to use local RapidWright source
+export RAPIDWRIGHT_PATH=$(pwd)/RapidWright
+export CLASSPATH=$RAPIDWRIGHT_PATH/bin:$RAPIDWRIGHT_PATH/jars/*
 
 # Verify Java is available (required for RapidWright)
 java -version
@@ -187,7 +198,8 @@ The Makefile will:
 | Target | Description |
 |--------|-------------|
 | `make help` | Show available targets and usage (default) |
-| `make setup` | Install dependencies, check tools, download example DCPs |
+| `make setup` | Install dependencies, build RapidWright, check tools, download example DCPs |
+| `make build-rapidwright` | Build RapidWright from source (git submodule); re-run after modifying RapidWright code |
 | `make run_optimizer DCP=<file>` | Run optimizer on specified DCP file (auto-generates output name) |
 | `make clean` | Remove run directories and .Xil directories (preserves optimized DCPs) |
 | `make veryclean` | Deep clean including example DCPs and Python cache |
@@ -453,6 +465,8 @@ The server:
 |----------|-------------|---------|
 | `VIVADO_EXEC` | Path to `vivado` executable (used by Makefile, VivadoMCP, and Python scripts) | `vivado` (auto-detect from PATH) |
 | `JAVA_HOME` | Java installation directory (required for RapidWright) | Auto-detected from `java` on PATH, or from Vivado's bundled Java |
+| `RAPIDWRIGHT_PATH` | Path to the RapidWright git submodule directory | Auto-set by Makefile to `$(CURDIR)/RapidWright` |
+| `CLASSPATH` | Java classpath for RapidWright classes and dependencies | Auto-set by Makefile to `$RAPIDWRIGHT_PATH/bin:$RAPIDWRIGHT_PATH/jars/*` |
 
 **Setting VIVADO_EXEC**: You can set this variable in multiple ways:
 ```bash
@@ -495,9 +509,10 @@ The RapidWright MCP server provides AI access to [RapidWright](https://github.co
 
 The server:
 1. Initializes RapidWright's JVM with configurable memory
-2. Loads/saves Vivado design checkpoints
-3. Provides design analysis and manipulation
-4. Implements optimization algorithms (fanout splitting, LUT optimization)
+2. Uses Java classes from the local `RapidWright/` git submodule (via `RAPIDWRIGHT_PATH`/`CLASSPATH`)
+3. Loads/saves Vivado design checkpoints
+4. Provides design analysis and manipulation
+5. Implements optimization algorithms (fanout splitting, LUT optimization)
 
 ### Available RapidWright Tools
 
@@ -754,7 +769,8 @@ Nets optimized: 5/5
 | Issue | Solution |
 |-------|----------|
 | "Could not find 'vivado' executable" | Set `VIVADO_EXEC` env var or use `make setup VIVADO_EXEC=/path/to/vivado` or source Vivado settings64.sh |
-| "RapidWright not initialized" | Ensure Java 11+ is installed |
+| "RapidWright not initialized" | Ensure Java 11+ is installed and RapidWright is built (`make build-rapidwright`) |
+| RapidWright changes not taking effect | Rebuild after modifying source: `make build-rapidwright` |
 | "Vivado command timed out" | Command may be still running; use `restart_vivado` to recover |
 | Out of memory (RapidWright) | Increase `jvm_max_memory` (e.g., "16G") |
 | Vivado hangs | Use `restart_vivado` tool to kill and restart Vivado |
@@ -797,19 +813,24 @@ Files/directories removed by `make clean`:
 
 ```
 fpl26_optimization_contest/
-├── Makefile                  # Build automation (setup, run, clean)
+├── Makefile                  # Build automation (setup, build-rapidwright, run, clean)
 ├── dcp_optimizer.py          # Main optimization agent
 ├── requirements.txt          # Python dependencies
 ├── README.md                 # This file
 ├── SYSTEM_PROMPT.TXT         # The system prompt used in dcp_optimizer.py
-├── VivadoMCP/               # Vivado MCP server (new stdin/stdout version)
-│   ├── vivado_mcp_server.py # MCP server with pexpect control
-│   ├── requirements.txt     # Python dependencies
-│   └── test_vivado_mcp.py   # Unit tests
-└── RapidWrightMCP/          # RapidWright MCP server
-    ├── server.py            # MCP server
-    ├── rapidwright_tools.py # RapidWright tool wrappers
-    └── setup.sh             # Setup script
+├── RapidWright/              # Git submodule (github.com/Xilinx/RapidWright)
+│   ├── src/                  # Java source code (modifiable by contestants)
+│   ├── bin/                  # Compiled Java classes (after build)
+│   ├── jars/                 # Third-party Java dependencies
+│   └── gradlew              # Gradle wrapper for building
+├── RapidWrightMCP/           # RapidWright MCP server
+│   ├── server.py             # MCP server
+│   ├── rapidwright_tools.py  # RapidWright tool wrappers
+│   └── setup.sh              # Setup script
+└── VivadoMCP/                # Vivado MCP server
+    ├── vivado_mcp_server.py  # MCP server with pexpect control
+    ├── requirements.txt      # Python dependencies
+    └── test_vivado_mcp.py    # Unit tests
 ```
 
 ## License

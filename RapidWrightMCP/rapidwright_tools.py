@@ -4,7 +4,8 @@
 
 """
 RapidWright Tools - Wrapper functions for RapidWright operations
-Uses the rapidwright pip package which handles JPype integration internally
+Uses the rapidwright pip package for JPype integration, with RAPIDWRIGHT_PATH
+and CLASSPATH pointing to the local RapidWright git submodule for Java classes.
 """
 import logging
 from typing import Dict, Any, Optional
@@ -92,7 +93,7 @@ def initialize_rapidwright(jvm_max_memory: str = "4G") -> Dict[str, Any]:
         return {
             "status": "error",
             "message": f"Failed to initialize RapidWright: {str(e)}",
-            "hint": "Make sure 'pip install rapidwright' completed successfully and Java 11+ is installed"
+            "hint": "Make sure RapidWright is built ('make build-rapidwright'), RAPIDWRIGHT_PATH/CLASSPATH are set, and Java 11+ is installed"
         }
 
 

@@ -34,6 +34,13 @@ ifndef JAVA_HOME
   endif
 endif
 
+# RapidWright submodule path and classpath
+# Points the Python rapidwright package to use the local RapidWright source
+# See: https://www.rapidwright.io/docs/Install_RapidWright_as_a_Python_PIP_Package.html#java-development-and-python
+RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
+export RAPIDWRIGHT_PATH
+export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
+
 # Example DCPs to download
 EXAMPLE_DCP_1 := demo_corundum_25g_misses_timing.dcp
 EXAMPLE_DCP_2 := logicnets_jscl.dcp
@@ -46,19 +53,20 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup run_optimizer validate validate_demo run-submission clean veryclean help
+.PHONY: setup build-rapidwright run_optimizer validate validate_demo run-submission clean veryclean help
 
 # Default target
 help:
 	@echo "FPGA Design Optimization Agent - Makefile"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  setup           - Install dependencies and download example DCPs"
-	@echo "  run_optimizer   - Run optimizer on a DCP file (agent or test mode)"
-	@echo "  validate        - Validate functional equivalence between two DCPs"
-	@echo "  validate_demo   - Run validation demo (self-check)"
-	@echo "  clean           - Remove generated files (run directories, logs, Vivado outputs)"
-	@echo "  veryclean       - Remove all generated files including example DCPs"
+	@echo "  setup              - Install dependencies, build RapidWright, download example DCPs"
+	@echo "  build-rapidwright  - Build RapidWright from source (git submodule)"
+	@echo "  run_optimizer      - Run optimizer on a DCP file (agent or test mode)"
+	@echo "  validate           - Validate functional equivalence between two DCPs"
+	@echo "  validate_demo      - Run validation demo (self-check)"
+	@echo "  clean              - Remove generated files (run directories, logs, Vivado outputs)"
+	@echo "  veryclean          - Remove all generated files including example DCPs"
 	@echo ""
 	@echo "Usage examples:"
 	@echo "  make setup"
@@ -82,17 +90,17 @@ help:
 	@echo "  - Run directory: dcp_optimizer_run-<timestamp>/ (contains all logs)"
 	@echo "  - Validation:    /tmp/dcp_validation_*/ (contains simulation logs)"
 
-# Setup target: Install dependencies, check Vivado, set up Java, download DCPs
+# Setup target: Install dependencies, check Vivado, set up Java, build RapidWright, download DCPs
 setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[1/5] Installing Python dependencies...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[1/6] Installing Python dependencies...$(COLOR_RESET)\n"
 	$(PIP) install -r requirements.txt
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[2/5] Checking Vivado...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[2/6] Checking Vivado...$(COLOR_RESET)\n"
 	@if command -v $(VIVADO_EXEC) >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
@@ -106,7 +114,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[3/5] Checking Java...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[3/6] Checking Java...$(COLOR_RESET)\n"
 	@if command -v java >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Java found: %s$(COLOR_RESET)\n" "$$(command -v java)"; \
 		java -version 2>&1 | head -n 1; \
@@ -139,7 +147,11 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[4/5] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[4/6] Building RapidWright from source...$(COLOR_RESET)\n"
+	@$(MAKE) build-rapidwright
+	@echo ""
+	
+	@printf "$(COLOR_YELLOW)[5/6] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
 	@if [ -f "$(EXAMPLE_DCP_1)" ]; then \
 		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_1) already exists$(COLOR_RESET)\n"; \
 	else \
@@ -158,7 +170,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[5/5] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[6/6] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
 	@if [ -f "$(EXAMPLE_DCP_2)" ]; then \
 		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_2) already exists$(COLOR_RESET)\n"; \
 	else \
@@ -188,6 +200,18 @@ setup:
 	@echo "  - Optimized DCP: <input_name>_optimized-<timestamp>.dcp"
 	@echo "  - Run logs: dcp_optimizer_run-<timestamp>/"
 	@echo ""
+
+# Build RapidWright from source (git submodule)
+build-rapidwright:
+	@printf "$(COLOR_YELLOW)Building RapidWright from source...$(COLOR_RESET)\n"
+	@if [ ! -f "$(RAPIDWRIGHT_PATH)/gradlew" ]; then \
+		printf "$(COLOR_YELLOW)Initializing RapidWright git submodule...$(COLOR_RESET)\n"; \
+		git submodule update --init RapidWright; \
+	fi
+	@cd "$(RAPIDWRIGHT_PATH)" && ./gradlew compileJava -p "$(RAPIDWRIGHT_PATH)"
+	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
+	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
+	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"
 
 # Run optimizer target: Run dcp_optimizer.py (output DCP name generated automatically)
 run_optimizer: 

@@ -20,14 +20,31 @@ This server enables AI assistants like Cursor to interact with FPGA designs, que
 
 ### Installation
 
+The recommended setup uses the contest repo's Makefile, which builds RapidWright from a git submodule:
+
 ```bash
-git clone https://gitenterprise.xilinx.com/clavin/RapidWrightMCP
+cd fpl26_optimization_contest
+make setup
+```
+
+This automatically:
+1. Installs Python dependencies (including the `rapidwright` pip package for JPype bridging)
+2. Builds RapidWright from the `RapidWright/` git submodule (`./gradlew compileJava`)
+3. Sets `RAPIDWRIGHT_PATH` and `CLASSPATH` so the pip package uses the local source
+
+To rebuild RapidWright after modifying its source code:
+
+```bash
+make build-rapidwright
+```
+
+### Manual Setup (standalone)
+
+```bash
 cd RapidWrightMCP
 ./setup.sh
 python3 test_server.py
 ```
-
-That's it! RapidWright is installed automatically via pip.
 
 ## Usage with Cursor
 
@@ -38,7 +55,11 @@ Add to your MCP configuration file:
   "mcpServers": {
     "rapidwright": {
       "command": "python3",
-      "args": ["/absolute/path/to/RapidWrightMCP/server.py"]
+      "args": ["/absolute/path/to/RapidWrightMCP/server.py"],
+      "env": {
+        "RAPIDWRIGHT_PATH": "/absolute/path/to/RapidWright",
+        "CLASSPATH": "/absolute/path/to/RapidWright/bin:/absolute/path/to/RapidWright/jars/*"
+      }
     }
   }
 }
@@ -196,6 +217,11 @@ After:   Driver_1 -> [250 loads]
 └─────────────────┘
 ```
 
+The `rapidwright` pip package provides the JPype/Python bridge, while the
+`RAPIDWRIGHT_PATH` and `CLASSPATH` environment variables redirect it to use
+Java classes compiled from the local `RapidWright/` git submodule. This allows
+contestants to modify and rebuild RapidWright source code directly.
+
 ## Development
 
 ### Project Structure
@@ -204,10 +230,16 @@ After:   Driver_1 -> [250 loads]
 RapidWrightMCP/
 ├── server.py              # Main MCP server
 ├── rapidwright_tools.py   # RapidWright wrapper functions
-├── requirements.txt       # Python dependencies
+├── requirements.txt       # Python dependencies (mcp + rapidwright pip bridge)
 ├── setup.sh              # Setup script
 ├── test_server.py        # Test suite
 └── rapidwright_mcp.log   # Log file (created at runtime)
+
+../RapidWright/            # Git submodule (Xilinx/RapidWright source)
+├── src/                   # Java source (modifiable by contestants)
+├── bin/                   # Compiled classes (after ./gradlew compileJava)
+├── jars/                  # Third-party dependencies
+└── gradlew               # Gradle wrapper for building
 ```
 
 ### Adding New Tools
@@ -259,12 +291,16 @@ tail -f rapidwright_mcp.log
 | "RapidWright not initialized" | Call `initialize_rapidwright` first; check Java 11+ is installed |
 | Server not appearing | Use absolute paths in config; restart Cursor/Claude completely |
 | Out of memory | Increase `jvm_max_memory` (e.g., "8G", "16G") |
-| Installation issues | `pip3 install --force-reinstall rapidwright` |
+| Local changes not picked up | Rebuild: `make build-rapidwright` from the repo root |
+| Installation issues | `pip3 install --force-reinstall rapidwright` (for the JPype bridge) |
 
 **Checklist:**
 - [ ] Python 3.8+? (`python3 --version`)
 - [ ] Java 11+? (`java -version`)
-- [ ] RapidWright installed? (`pip3 show rapidwright`)
+- [ ] RapidWright pip bridge installed? (`pip3 show rapidwright`)
+- [ ] RapidWright submodule present? (`ls RapidWright/gradlew`)
+- [ ] RapidWright compiled? (`ls RapidWright/build/libs/main.jar`)
+- [ ] `RAPIDWRIGHT_PATH` set? (`echo $RAPIDWRIGHT_PATH`)
 - [ ] Config paths absolute?
 - [ ] Cursor restarted?
 - [ ] Check logs? (`cat rapidwright_mcp.log`)
