@@ -133,7 +133,7 @@ def start_vivado(log_file: Optional[str] = None, journal_file: Optional[str] = N
         vivado_path,
         args=args,
         encoding="utf-8",
-        timeout=90,  # 15 min default timeout for startup
+        timeout=300,  # 5 min default timeout for startup; AWS cold start can be very slow
         maxread=10000000,  # 10MB buffer for large outputs
         searchwindowsize=10000,  # Search window for prompt matching
         env=env,  # Use dumb terminal to prevent line wrapping

@@ -76,10 +76,11 @@ The fastest way to get started is with the Makefile:
 # 1. Run setup (installs dependencies, downloads example DCPs)
 make setup
 
-# 2. Set OpenRouter API Key
-export OPENROUTER_API_KEY="<your_key_here>"
+# 2a. Run in test mode (no API key required)
+make run_test DCP=demo_corundum_25g_misses_timing.dcp
 
-# 3. Run optimizer on an example design
+# 2b. Or run the full LLM-guided optimizer (requires API key)
+export OPENROUTER_API_KEY="<your_key_here>"
 make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
 ```
 
@@ -182,14 +183,17 @@ RapidWright (used for netlist manipulation) may need `JAVA_HOME` to locate the J
 The Makefile provides convenient targets for running the optimizer:
 
 ```bash
-# Run optimizer on a DCP file (uses test mode by default)
-make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
+# Test mode: no API key required, uses hardcoded optimization flow
+make run_test DCP=demo_corundum_25g_misses_timing.dcp
+make run_test DCP=logicnets_jscl.dcp
+make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3
 
-# Or with the other example
-make run_optimizer DCP=logicnets_jscl.dcp
+# Full agent mode: LLM-guided optimization (requires OPENROUTER_API_KEY)
+export OPENROUTER_API_KEY="<your_key_here>"
+make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
 ```
 
-The Makefile will:
+Both targets will:
 - Generate timestamped output: `<input>_optimized-YYYYMMDD_HHMMSS.dcp` (in same directory as input)
 - Create a run directory: `dcp_optimizer_run-YYYYMMDD_HHMMSS/` (contains all logs and intermediate files)
 
@@ -200,7 +204,8 @@ The Makefile will:
 | `make help` | Show available targets and usage (default) |
 | `make setup` | Install dependencies, build RapidWright, check tools, download example DCPs |
 | `make build-rapidwright` | Build RapidWright from source (git submodule); re-run after modifying RapidWright code |
-| `make run_optimizer DCP=<file>` | Run optimizer on specified DCP file (auto-generates output name) |
+| `make run_test DCP=<file>` | Run optimizer in test mode — no LLM required (supports `MAX_NETS` option) |
+| `make run_optimizer DCP=<file>` | Run LLM-guided optimizer (requires `OPENROUTER_API_KEY`) |
 | `make clean` | Remove run directories and .Xil directories (preserves optimized DCPs) |
 | `make veryclean` | Deep clean including example DCPs and Python cache |
 
@@ -478,6 +483,7 @@ python3 dcp_optimizer.py input.dcp --test
 VIVADO_EXEC=/path/to/vivado python3 dcp_optimizer.py input.dcp --test
 
 # Method 3: Through Makefile
+make run_test DCP=input.dcp VIVADO_EXEC=/path/to/vivado
 make run_optimizer DCP=input.dcp VIVADO_EXEC=/path/to/vivado
 ```
 
