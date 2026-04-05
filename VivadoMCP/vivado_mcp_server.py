@@ -468,10 +468,14 @@ def extract_critical_path_cells(
     timeout: float = 600.0
 ) -> str:
     """
-    Extract cell names from critical timing paths for spread analysis.
+    Extract cell names from critical timing paths.
     
     Parses timing report to get ordered list of cells on each critical path.
-    Output is JSON format that can be passed to RapidWright's analyze_critical_path_spread.
+    Output is JSON format that can be passed to RapidWright's
+    analyze_critical_path_spread.
+    
+    For pin-level data (needed by analyze_net_detour), use
+    extract_critical_path_pins instead.
     
     Args:
         num_paths: Number of critical paths to extract
@@ -484,6 +488,8 @@ def extract_critical_path_cells(
     import re
     import json
     
+    pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
+                    '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6']
     # Generate detailed timing report
     cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
     
@@ -497,19 +503,24 @@ def extract_critical_path_cells(
     
     all_paths = []
     
-    for path_idx, path_section in enumerate(path_sections[1:], 1):  # Skip first (header)
+    for path_idx, path_section in enumerate(path_sections[1:], 1):
+        in_data_section = False
         cell_names = []
         
         for line in path_section.split('\n'):
-            # Match cell instances - look for hierarchical paths
-            if '/' in line and not line.strip().startswith('net'):
+            stripped = line.strip()
+            
+            if stripped.startswith('---'):
+                in_data_section = True
+                continue
+            if not in_data_section:
+                continue
+            
+            if '/' in line and not stripped.startswith('net (') and not stripped.startswith('net('):
                 parts = line.split()
                 for part in parts:
                     if '/' in part and not part.startswith('('):
-                        # Remove pin suffix (e.g., /C, /D, /O, /Q, /CE, etc.)
                         cell_path = part
-                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE', 
-                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6']
                         for suffix in pin_suffixes:
                             if cell_path.endswith(suffix):
                                 cell_path = cell_path[:-len(suffix)]
@@ -531,6 +542,120 @@ def extract_critical_path_cells(
             return json.dumps({
                 "status": "success",
                 "message": f"Extracted {len(all_paths)} critical paths",
+                "output_file": output_file,
+                "path_count": len(all_paths)
+            })
+        except Exception as e:
+            return json.dumps({"error": f"Error writing to file: {str(e)}"})
+    else:
+        return json.dumps(all_paths)
+
+
+def extract_critical_path_pins(
+    num_paths: int = 50,
+    output_file: str = None,
+    timeout: float = 600.0
+) -> str:
+    """
+    Extract pin-level paths from critical timing paths.
+
+    Each path is a flat list of pin references like:
+        ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+
+    Two consecutive pins from the same cell represent the cell's data path.
+    Two consecutive pins from different cells represent a connecting net.
+
+    Input pins are extracted from the Prop label (e.g. Prop_LUT6_I2_O -> I2).
+    Output/endpoint pins come from the pin path directly (e.g. cell/O, cell/D).
+
+    Args:
+        num_paths: Number of critical paths to extract
+        output_file: Optional path to write JSON output to file
+        timeout: Command timeout in seconds
+
+    Returns:
+        JSON string with list of pin paths
+    """
+    import re
+    import json
+
+    cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
+
+    try:
+        timing_report = run_tcl_command(cmd, timeout=timeout)
+    except Exception as e:
+        return json.dumps({"error": f"Error generating timing report: {str(e)}"})
+
+    path_sections = re.split(r'Slack \(', timing_report)
+
+    all_paths = []
+
+    for path_idx, path_section in enumerate(path_sections[1:], 1):
+        pins = []
+        separator_count = 0
+        pending_in_pin = None
+
+        for line in path_section.split('\n'):
+            stripped = line.strip()
+
+            if stripped.startswith('---'):
+                separator_count += 1
+                continue
+            # Data path is between the 2nd and 3rd --- separators
+            if separator_count < 2:
+                continue
+            if separator_count >= 3:
+                break
+            if stripped.startswith('net (') or stripped.startswith('net('):
+                continue
+
+            # Check for Prop label (on cell-type line, typically no '/')
+            # e.g. Prop_E6LUT_SLICEL_I0_O or Prop_CARRY8_SLICEL_S[4]_CO[7]
+            prop_match = re.search(
+                r'\(Prop_\S+_(\w+(?:\[\d+\])?)_(\w+(?:\[\d+\])?)\)', line)
+            if prop_match:
+                in_pin_name = prop_match.group(1)
+                if in_pin_name not in ('C', 'CLK'):
+                    pending_in_pin = in_pin_name
+                else:
+                    pending_in_pin = None
+
+            if '/' not in line:
+                continue
+
+            # Find the full pin path (e.g. "cell/Q" or "cell/O")
+            parts = line.split()
+            pin_path = None
+            for part in parts:
+                if '/' in part and not part.startswith('('):
+                    pin_path = part
+            if pin_path is None:
+                continue
+
+            last_slash = pin_path.rfind('/')
+            if last_slash <= 0:
+                continue
+            cell_path = pin_path[:last_slash]
+
+            if pending_in_pin is not None:
+                pins.append(cell_path + '/' + pending_in_pin)
+                pins.append(pin_path)
+                pending_in_pin = None
+            else:
+                pins.append(pin_path)
+
+        if len(pins) >= 2:
+            all_paths.append(pins)
+
+    if output_file:
+        try:
+            import os
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(all_paths, f, indent=2)
+            return json.dumps({
+                "status": "success",
+                "message": f"Extracted {len(all_paths)} critical path pin sequences",
                 "output_file": output_file,
                 "path_count": len(all_paths)
             })
@@ -1146,12 +1271,46 @@ async def list_tools():
         ),
         Tool(
             name="extract_critical_path_cells",
-            description="""Extract cell names from critical timing paths for spread analysis.
+            description="""Extract cell names from critical timing paths.
             
             Parses timing report to get ordered list of cells on each critical path.
-            Output is JSON that can be passed to RapidWright's analyze_critical_path_spread 
-            to calculate Manhattan distances.
+            Output is JSON that can be passed to RapidWright's
+            analyze_critical_path_spread.
             
+            For pin-level data (needed by analyze_net_detour), use
+            extract_critical_path_pins instead.
+            
+            Can optionally write to a file for efficient data transfer.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_paths": {
+                        "type": "number",
+                        "description": "Number of critical paths to extract (default: 50)"
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Optional: path to write JSON output to file instead of returning it"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 600)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="extract_critical_path_pins",
+            description="""Extract pin-level paths from critical timing paths.
+
+            Each path is a flat list of pin references like:
+                ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+
+            Two consecutive pins from the same cell represent the cell's data path.
+            Two consecutive pins from different cells represent a connecting net.
+            This format allows RapidWright's analyze_net_detour to resolve nets and
+            SitePinInsts via O(1) lookups with no scanning.
+
             Can optionally write to a file for efficient data transfer.""",
             inputSchema={
                 "type": "object",
@@ -1520,6 +1679,14 @@ async def call_tool(name: str, arguments: dict):
             output = extract_critical_path_cells(num_paths, output_file, timeout)
             return [TextContent(type="text", text=output)]
         
+        elif name == "extract_critical_path_pins":
+            num_paths = arguments.get("num_paths", 50)
+            output_file = arguments.get("output_file")
+            timeout = arguments.get("timeout", 600)
+
+            output = extract_critical_path_pins(num_paths, output_file, timeout)
+            return [TextContent(type="text", text=output)]
+
         elif name == "report_utilization_for_pblock":
             timeout = arguments.get("timeout", 300)
             output = report_utilization_for_pblock(timeout)
