@@ -75,7 +75,7 @@ See `_compute_routed_path_length()` and `_detour_ratio()` in `rapidwright_tools.
 
 #### 2b. The Full Analysis Tool
 
-The `analyze_net_detour` tool performs a **cell-centric** analysis.  For each interior cell on the critical path, it examines both the *incoming* net (feeding the cell) and the *outgoing* net (driven by it).  A high detour ratio on either side is evidence the cell is poorly placed.
+The `analyze_net_detour` tool performs a **cell-centric** analysis.  For each interior cell on the critical path, it examines both the *incoming* net (feeding the cell) and the *outgoing* net (driven by it) to compute the worst-case detour ratio across the source pin and *all* sink pins.  A high detour ratio may be indicative that the cell is poorly placed.
 
 The input is a **pin-path** list as produced by `extract_critical_path_pins`:
 
@@ -189,7 +189,7 @@ Here is the complete sequence of MCP tool calls an agent would make:
 
 ## Try It Yourself
 
-The benchmark `vexriscv_re-place_2025.1.dcp` has a critical path with a deliberately misplaced LUT2 that the recipe can fix.  Here is a complete Python script that runs all four steps.  It assumes the DCP is in the current directory:
+The benchmark `vexriscv_re-place_2025.1.dcp` has a critical path with a deliberately misplaced LUT2 that the recipe can fix.  Here is a complete Python script that runs all four steps.  It assumes the DCP is in the `fpl26_contest_benchmarks/` directory:
 
 ```python
 #!/usr/bin/env python3
@@ -201,7 +201,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "RapidWrightMCP"))
 import vivado_mcp_server as vivado
 import rapidwright_tools as rw
 
-DCP = "vexriscv_re-place_2025.1.dcp"
+DCP = "fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp"
 OPT_DCP = "vexriscv_optimized.dcp"
 
 

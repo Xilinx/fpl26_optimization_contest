@@ -1692,6 +1692,9 @@ def optimize_cell_placement(
             for net in connected_nets:
                 affected_net_names.append(str(net.getName()))
                 try:
+                    # Note: this removes all routing on the entire net.
+                    #       For incoming nets of a re-placed cell, this will also unroute
+                    #       any routing going to other unrelated cells.
                     net.unroute()
                 except Exception:
                     pass
