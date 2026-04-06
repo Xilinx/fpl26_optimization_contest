@@ -1361,8 +1361,10 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
 
 def _get_cell_physical_nets(design, cell):
     """
-    Get all physical (non-static, non-clock) nets connected to a specific cell by tracing
-    its logical pins through site wires to physical nets.
+    Get all physical (non-static, non-clock) nets connected to a specific cell.
+
+    Uses EDIFHierPortInst.getRoutedSitePinInst() to resolve each logical pin
+    to its physical SitePinInst, then reads the Net from that pin.
 
     Args:
         design: RapidWright Design object
@@ -1371,34 +1373,22 @@ def _get_cell_physical_nets(design, cell):
     Returns:
         List of Net objects connected to this cell
     """
-    siteInst = cell.getSiteInst()
-    if siteInst is None: 
-        return []
     net_names = set()
     nets = []
-    try:
-        edif_inst = cell.getEDIFCellInst()
-        if edif_inst is None:
-            return []
 
-        for port_inst in edif_inst.getPortInsts():
-            logical_pin = str(port_inst.getName())
-            try:
-                site_wire = cell.getSiteWireNameFromLogicalPin(logical_pin)
-                if site_wire is None:
-                    continue
-                net = siteInst.getNetFromSiteWire(site_wire)
-                if net is None or net.isStaticNet() or net.isClockNet():
-                    continue
-                name = str(net.getName())
-                if name not in net_names:
-                    net_names.add(name)
-                    nets.append(net)
-            except Exception:
-                continue
-    except Exception as e:
-        logger.debug(f"Could not get nets for cell {cell.getName()}: {e}")
-
+    hier_cell = cell.getEDIFHierCellInst()
+    if hier_cell is None:
+        return []
+    for ehpi in hier_cell.getHierPortInsts():
+        spi = ehpi.getRoutedSitePinInst(design)
+        if spi is None:
+            continue
+        net = spi.getNet()
+        if net is not None and not net.isStaticNet() and not net.isClockNet():
+            name = str(net.getName())
+            if name not in net_names:
+                net_names.add(name)
+                nets.append(net)
     return nets
 
 def _compute_routed_path_length(net, sink_pin):
