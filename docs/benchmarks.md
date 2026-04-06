@@ -11,8 +11,8 @@ tables:
 |----------------------|--------------|---:|--:|---:|----:|---------:|
 | [AMD](https://github.com/amd/mini-isp)                  |`amd_mini-isp`                                    |3k |4k |40  |12  |307  |
 | [BOOM](https://github.com/riscv-boom/riscv-boom)       |`boom_soc`                                    |227k |98k |61  |161  |48.2  |
-| [Corescore](https://github.com/olofk/corescore)              |`corescore_500_mod`                               |100k |120k|0 |250  |344.2 |
-| [Finn](https://github.com/Xilinx/finn)              |`finn_radioml`                               |74k |46k|0 |25  |284.9 |
+| [CoreScore](https://github.com/olofk/corescore)              |`corescore_500_mod`                               |100k |120k|0 |250  |344.2 |
+| [FINN](https://github.com/Xilinx/finn)              |`finn_radioml`                               |74k |46k|0 |25  |284.9 |
 | [ISPD16](https://www.ispd.cc/contests/16/)              |`ispd16_example2`                               |289k |234k|200 |384  |107.6 |
 | [LogicNets](https://github.com/Xilinx/logicnets)       |`logicnets_jscl` (Jet Substructure Classification L)|31k  |2k  |0   |0    |403.6 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_3d-rendering`                           |14k  |5k  |3   |0    |270.9 |
@@ -69,9 +69,9 @@ Each of the benchmarks targets the `xcvu3p-ffvc1517-2-e` device which has the fo
 
 Some designs will have multiple clock domains.  To make it obvious which clock domain to optimize, each benchmark has a created XDC clock constraint called `clk_fpl26contest` that should be optimized.  All benchmarks in the contest will have the following attributes:
 
-1. A created clock constraint named `clk_fpl26contest` that should be the target focus clock domain to optimize.
-2. All benchmark designs will meet all hold and pulse width constraints.  If team's solution design does not meet hold or pulse width constraints after evaluation, their score will be 0 for that design.
-3. The specific clock constraint given to a benchmark is not relevant for the contest, it is only present to encourage tools to try harder.  The focus is primarily on Fmax improvement.  There is not additional bonus for pushing a design to meet or exceed the constraint (positive WNS) other than the corresponding Fmax improvement.
+1. A created clock constraint named `clk_fpl26contest` that should be the target clock domain to optimize.
+2. All benchmark designs will meet all hold and pulse width constraints.  If a team's solution does not meet hold or pulse width constraints after evaluation, their score will be 0 for that design.
+3. The specific clock constraint given to a benchmark is not relevant for the contest, it is only present to encourage tools to try harder.  The focus is primarily on Fmax improvement.  There is no additional bonus for pushing a design to meet or exceed the constraint (positive WNS) other than the corresponding Fmax improvement.
 
 ### Querying the contest clock in Vivado
 
