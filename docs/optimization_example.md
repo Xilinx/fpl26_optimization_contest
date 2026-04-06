@@ -91,11 +91,10 @@ analyze_net_detour(pin_paths, detour_threshold):
         resolve each pin name → EDIFHierPortInst
         group consecutive pins belonging to the same cell → (in_pin, out_pin)
 
-        for each (in_pin, out_pin):
-            for each pin:
-                get the physical net and SitePinInst
-                if output pin → check detour to all sink pins (max)
-                if input pin  → check detour to this pin
+        for each pin in (in_pin, out_pin):
+            get the physical net and SitePinInst
+            if output pin → check detour to all sink pins (max)
+            if input pin  → check detour to this pin
             record max detour ratio
 
     return cells where max_detour_ratio > threshold, sorted descending
@@ -167,7 +166,7 @@ Here is the complete sequence of MCP tool calls an agent would make:
  ┌─── Baseline ──────────────────────────────────────────────────────────┐
  │ 1. vivado:  open_checkpoint(input.dcp)                                │
  │ 2. vivado:  report_timing_summary  → baseline WNS                     │
- │ 3. vivado:  extract_critical_path_pins(clock_filter=contest_clock)    │
+ │ 3. vivado:  extract_critical_path_pins(num_paths=10)                  │
  └───────────────────────────────────────────────────────────────────────┘
 
  ┌─── Analyze ───────────────────────────────────────────────┐
@@ -246,9 +245,7 @@ print(f"  Clock period:   {clk_period} ns")
 print(f"  Baseline WNS:   {baseline_wns} ns")
 print(f"  Baseline Fmax:  {baseline_fmax:.2f} MHz")
 
-pins_json = vivado.extract_critical_path_pins(
-    num_paths=10, clock_filter=CONTEST_CLOCK
-)
+pins_json = vivado.extract_critical_path_pins(num_paths=10)
 critical_paths = json.loads(pins_json)
 print(f"  Extracted {len(critical_paths)} critical path pin lists")
 vivado.cleanup_vivado()
