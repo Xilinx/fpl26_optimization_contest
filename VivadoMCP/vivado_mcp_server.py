@@ -1151,10 +1151,14 @@ async def list_tools():
         ),
         Tool(
             name="get_wns",
-            description="Get the Worst Negative Slack (WNS) value directly. Returns just the numeric slack value in nanoseconds.",
+            description="Get the Worst Negative Slack (WNS) value directly. Returns just the numeric slack value in nanoseconds. Optionally filter by a specific clock domain.",
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "clock": {
+                        "type": "string",
+                        "description": "Clock name to filter WNS by (e.g., 'clk_fpl26contest'). If omitted, returns overall WNS across all clocks."
+                    },
                     "timeout": {
                         "type": "number",
                         "description": "Timeout in seconds (default: 60)"
@@ -1612,10 +1616,19 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
+            clock = arguments.get("clock", None)
             # Flush buffer first
             run_tcl_command("puts {get_wns_start}", timeout=5)
-            # Get WNS directly from timing path slack property (single line to avoid buffer issues)
-            tcl_cmd = "set wns_path [get_timing_paths -max_paths 1 -slack_lesser_than 999]; if {[llength $wns_path] > 0} {get_property SLACK $wns_path} else {puts 0.0}"
+            if clock:
+                tcl_cmd = (
+                    f"set clk_obj [get_clocks -quiet {{{clock}}}]; "
+                    f"if {{$clk_obj ne {{}}}} {{ "
+                    f"  set wns_path [get_timing_paths -max_paths 1 -setup -to $clk_obj]; "
+                    f"  if {{[llength $wns_path] > 0}} {{get_property SLACK $wns_path}} else {{puts 0.0}} "
+                    f"}} else {{puts {{ERROR: clock not found}}}}"
+                )
+            else:
+                tcl_cmd = "set wns_path [get_timing_paths -max_paths 1 -slack_lesser_than 999]; if {[llength $wns_path] > 0} {get_property SLACK $wns_path} else {puts 0.0}"
             output = run_tcl_command(tcl_cmd, timeout=timeout)
             # Clean up the output to just return the number
             wns_value = output.strip().split('\n')[-1].strip()
