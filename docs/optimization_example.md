@@ -153,6 +153,10 @@ vivado:       report_timing_summary             ← compare new WNS to baseline
 
 Because `optimize_cell_placement` calls `net.unroute()` on every net connected to the moved cells, Vivado's `route_design` will incrementally re-route only those nets—the rest of the design stays intact.
 
+If the optimization does not yield any benefit, the path of exploration can be abandoned or further explored to see if compounding multiple optimizations together can yield a larger benefit.  This decision is entirely up to the team for implementation.  Another idea to consider would be to batch optimizations in RapidWright (applying multiple optimizations at once) and then pushing the result back to Vivado to amortize the roundtrip cost of re-loading the DCP in Vivado.
+
+There are many possible variations of this optimization.  One other idea could be to replicate the cell (instead of re-placing it) in the new location.  This could potentially be less invasive and would not disturb any existing closed timing routes.
+
 ---
 
 ## Putting It All Together
