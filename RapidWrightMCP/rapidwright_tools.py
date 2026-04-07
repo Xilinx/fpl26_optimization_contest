@@ -57,9 +57,18 @@ def initialize_rapidwright(jvm_max_memory: str = "4G") -> Dict[str, Any]:
         return result
     
     try:
+        import os
+        # Point at the local RapidWright submodule so we always pick up
+        # locally-built classes instead of whatever the shell env has.
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rw_root = os.path.join(project_root, "RapidWright")
+        os.environ["RAPIDWRIGHT_PATH"] = rw_root
+        jars_dir = os.path.join(rw_root, "jars")
+        jar_entries = [os.path.join(jars_dir, j) for j in os.listdir(jars_dir) if j.endswith(".jar")]
+        os.environ["CLASSPATH"] = os.path.join(rw_root, "bin") + ":" + ":".join(jar_entries)
+
         # Import rapidwright - this automatically starts the JVM
         import rapidwright
-        import os
         from com.xilinx.rapidwright.device import Device
         
         _initialized = True
@@ -1345,6 +1354,409 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
         
     except Exception as e:
         logger.error(f"Error comparing designs: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+def _get_cell_physical_nets(design, cell):
+    """
+    Get all physical (non-static, non-clock) nets connected to a specific cell.
+
+    Uses EDIFHierPortInst.getRoutedSitePinInst() to resolve each logical pin
+    to its physical SitePinInst, then reads the Net from that pin.
+
+    Args:
+        design: RapidWright Design object
+        cell: RapidWright Cell object (must be placed)
+
+    Returns:
+        List of Net objects connected to this cell
+    """
+    net_names = set()
+    nets = []
+
+    hier_cell = cell.getEDIFHierCellInst()
+    if hier_cell is None:
+        return []
+    for ehpi in hier_cell.getHierPortInsts():
+        spi = ehpi.getRoutedSitePinInst(design)
+        if spi is None:
+            continue
+        net = spi.getNet()
+        if net is not None and not net.isStaticNet() and not net.isClockNet():
+            name = str(net.getName())
+            if name not in net_names:
+                net_names.add(name)
+                nets.append(net)
+    return nets
+
+def _compute_routed_path_length(net, sink_pin):
+    """
+    Compute the routed path length from a net's source to a specific sink pin.
+
+    Walks backwards from the sink pin node to the source pin node, summing 
+    Manhattan tile distances along the way at each PIP.
+
+    Args:
+        net: RapidWright Net object (must be routed, i.e. have PIPs)
+        sink_pin: RapidWright SitePinInst object for the sink site pin
+
+    Returns:
+        Routed path length in tile Manhattan distance units, or -1 if not found
+    """
+    pips = net.getPIPs()
+    if pips is None or pips.size() == 0:
+        return -1
+    
+    # Build a Node map to use as a lookup as we traverse nodes backwards from the
+    # sink pin to the source pin.
+    node_map = {}
+    for pip in pips:
+        if pip.isReversed():
+            end_node, start_node = pip.getStartNode(), pip.getEndNode()
+        else:
+            end_node, start_node = pip.getEndNode(), pip.getStartNode()
+        if end_node is not None and start_node is not None:
+            node_map[end_node] = start_node
+    
+    src_pin = net.getSource()
+    if src_pin is None:
+        return -1
+    source_node = src_pin.getConnectedNode()
+    sink_node = sink_pin.getConnectedNode()
+    if source_node is None or sink_node is None:
+        return -1    
+
+    # Traverse backwards (sink to source), accumulate Manhattan node (tile-to-tile) distances along the way
+    length = 0
+    node = sink_node
+    while node is not None and node != source_node:
+        prev = node_map.get(node)
+        if prev is None:
+            return -1
+        length += node.getTile().getManhattanDistance(prev.getTile())
+        node = prev
+
+    return length if node == source_node else -1
+
+def _detour_ratio(net, sink_pin):
+    """Return the detour ratio for the provided sink back to the source of the provided net.
+
+        Args:
+        net: RapidWright Net object (must be routed, i.e. have PIPs)
+        sink_pin: RapidWright SitePinInst object for the sink site pin
+    """
+    src_pin = net.getSource()
+    if src_pin is None or src_pin.getSite() is None:
+        return -1
+    sink_site = sink_pin.getSite()
+    if sink_site is None:
+        return -1
+
+    dist = src_pin.getTile().getManhattanDistance(sink_site.getTile())
+    if dist == 0:
+        return -1
+    routed_length = _compute_routed_path_length(net, sink_pin)    
+    if routed_length <= 0:
+        return -1
+
+    return routed_length / dist
+
+def analyze_net_detour(
+    critical_paths_data: list = None,
+    detour_threshold: float = 2.0,
+    input_file: str = None,
+) -> Dict[str, Any]:
+    """
+    Analysis of routing for large detours on critical paths.
+
+    For each interior cell on a critical path, computes the detour ratio of
+    the incoming net (feeding the cell) and the outgoing net (driven by it).
+    A high ratio on either side indicates the cell may benefit from
+    re-placement closer to its connections.
+
+    Input is a list of pins on the path as produced by Vivado MCP Server's
+    extract_critical_path_pins:
+        ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+
+    Args:
+        critical_paths_data: List of paths, each a list of pin-path strings
+                             from extract_critical_path_pins
+        detour_threshold: Flag cells with max detour ratio above this (default: 2.0)
+        input_file: Optional JSON file path containing critical_paths_data
+
+    Returns:
+        Dictionary with per-cell detour analysis and ranked re-placement candidates
+    """
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    if input_file:
+        try:
+            import json
+            with open(input_file, 'r') as f:
+                critical_paths_data = json.load(f)
+        except Exception as e:
+            return {"error": f"Error reading input file: {str(e)}"}
+
+    if not critical_paths_data:
+        return {"error": "No critical path data provided. "
+                "Specify either critical_paths_data or input_file."}
+
+    try:
+        design = _current_design
+        netlist = design.getNetlist()
+
+        logger.info(f"Analyzing {len(critical_paths_data)} critical paths for "
+                     f"routing detours (threshold={detour_threshold})")
+
+        all_cells = []
+        candidates = []
+    
+        for path_idx, pin_list in enumerate(critical_paths_data):
+            if len(pin_list) < 3:
+                continue
+            cells_on_path = []
+            prev_pin = None
+
+            # Find cells on the path
+            for pin_name in pin_list:
+                pin = netlist.getHierPortInstFromName(pin_name)
+                if pin is None:
+                    continue
+                # If current pin and previous pin point to the same cell 
+                if prev_pin is not None and pin.getFullHierarchicalInst().equals(prev_pin.getFullHierarchicalInst()):
+                    cells_on_path.append((prev_pin, pin))
+                prev_pin = pin
+            
+            for (in_pin, out_pin) in cells_on_path:
+                ratio = -1
+                for pin in (in_pin, out_pin):
+                    if pin is not None:
+                        net = pin.getRoutedPhysicalNet(design)
+                        if net is not None and not net.isStaticNet() and not net.isClockNet():
+                            spi = pin.getRoutedSitePinInst(design)
+                            if spi is not None:
+                                if spi.isOutPin():
+                                    for sink_spi in net.getSinkPins():
+                                        cr = _detour_ratio(net, sink_spi)
+                                        if cr > ratio:
+                                            ratio = cr
+                                else:
+                                    cr = _detour_ratio(net, spi)
+                                    if cr > ratio:
+                                        ratio = cr
+                cell_analysis = {
+                    "path": path_idx + 1,
+                    "cell": in_pin.getFullHierarchicalInst().toString(),
+                    "max_detour_ratio": round(ratio, 2),
+                }
+                all_cells.append(cell_analysis)
+                if ratio > detour_threshold:
+                    candidates.append(cell_analysis)
+
+        candidates.sort(key=lambda x: -x["max_detour_ratio"])
+        all_cells.sort(key=lambda x: -x.get("max_detour_ratio", 0))
+
+        return {
+            "status": "success",
+            "cells_analyzed": len(all_cells),
+            "candidates_found": len(candidates),
+            "detour_threshold": detour_threshold,
+            "candidates": candidates,
+            "all_cells": all_cells,
+        }
+
+    except Exception as e:
+        logger.error(f"Error analyzing net detours: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}                
+
+#
+
+
+def optimize_cell_placement(
+    cell_names: list,
+    max_candidates: int = 10,
+) -> Dict[str, Any]:
+    """
+    Re-place cells at the centroid of their connections to reduce routing detours.
+
+    For each candidate cell:
+      1. Finds all nets connected to the cell
+      2. Collects tile coordinates of every pin on those nets
+      3. Computes the centroid using ECOPlacementHelper.getCentroidOfPoints()
+      4. Spirals outward from the centroid to find an available SLICE site
+      5. Unplaces the cell, unroutes affected nets, and re-places at the new site
+
+    After running, write the checkpoint and load it in Vivado to re-route the
+    unrouted nets with route_design.
+
+    Args:
+        cell_names: List of cell names to re-place
+        max_candidates: Maximum number of cells to process (default: 10)
+
+    Returns:
+        Dictionary with per-cell re-placement results
+    """
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from com.xilinx.rapidwright.design import DesignTools
+        from com.xilinx.rapidwright.eco import ECOPlacementHelper
+        from com.xilinx.rapidwright.placer.blockplacer import Point
+        from com.xilinx.rapidwright.device import SiteTypeEnum
+        from java.util import ArrayList, EnumSet, HashMap
+
+        design = _current_design
+        device = design.getDevice()
+        target_site_types = EnumSet.of(SiteTypeEnum.SLICEL, SiteTypeEnum.SLICEM)
+
+        results = []
+        cells_to_process = cell_names[:max_candidates]
+
+        for cell_name in cells_to_process:
+            cell = design.getCell(cell_name)
+            if cell is None:
+                results.append({"cell": cell_name, "status": "error",
+                                "message": f"Cell '{cell_name}' not found"})
+                continue
+
+            if not cell.isPlaced():
+                results.append({"cell": cell_name, "status": "error",
+                                "message": "Cell is not placed"})
+                continue
+
+            old_site = cell.getSite()
+            old_tile = old_site.getTile()
+            old_placement = str(old_site.getName())
+            old_bel = cell.getBEL()
+            is_ff = old_bel.isFF() if old_bel is not None else False
+            is_lut = old_bel.isLUT() if old_bel is not None else False
+
+            # Gather clock net before unplacing (needed for FF compatibility)
+            clk_net = None
+            if is_ff:
+                try:
+                    clk_wire = cell.getSiteWireNameFromLogicalPin("C")
+                    if clk_wire:
+                        clk_net = cell.getSiteInst().getNetFromSiteWire(clk_wire)
+                except Exception:
+                    pass
+
+            connected_nets = _get_cell_physical_nets(design, cell)
+            if not connected_nets:
+                results.append({"cell": cell_name, "status": "skipped",
+                                "message": "No connected nets found"})
+                continue
+
+            # Collect all pin tile locations for centroid computation
+            points = ArrayList()
+            for net in connected_nets:
+                for pin in net.getPins():
+                    try:
+                        t = pin.getTile()
+                        if t is not None:
+                            points.add(Point(t.getColumn(), t.getRow()))
+                    except Exception:
+                        continue
+
+            if points.size() < 2:
+                results.append({"cell": cell_name, "status": "skipped",
+                                "message": "Not enough connection points"})
+                continue
+
+            centroid_site = ECOPlacementHelper.getCentroidOfPoints(
+                device, points, target_site_types
+            )
+            if centroid_site is None:
+                results.append({"cell": cell_name, "status": "error",
+                                "message": "Could not compute centroid site"})
+                continue
+
+            # --- Perform the move ---
+            # 1. Unplace cell (pass None for immediate site wire cleanup)
+            DesignTools.fullyUnplaceCell(cell, None)
+
+            # 2. Unroute affected nets
+            affected_net_names = []
+            for net in connected_nets:
+                affected_net_names.append(str(net.getName()))
+                try:
+                    # Note: this removes all routing on the entire net.
+                    #       For incoming nets of a re-placed cell, this will also unroute
+                    #       any routing going to other unrelated cells.
+                    net.unroute()
+                except Exception:
+                    pass
+
+            # 3. Find available site spiraling out from centroid
+            new_site = None
+            new_bel = None
+            search_limit = 200
+
+            for idx, candidate in enumerate(
+                ECOPlacementHelper.spiralOutFrom(centroid_site)
+            ):
+                if idx >= search_limit:
+                    break
+                if design.getSiteInstFromSite(candidate) is None:
+                    bel_name = "AFF" if is_ff else "A6LUT" if is_lut else str(
+                        old_bel.getName()) if old_bel else "A6LUT"
+                    bel = candidate.getBEL(bel_name)
+                    if bel is not None:
+                        new_site = candidate
+                        new_bel = bel
+                        break
+
+            if new_site is None or new_bel is None:
+                results.append({"cell": cell_name, "status": "error",
+                                "message": "No available site near centroid"})
+                continue
+
+            # 4. Place cell at new site and route the intra-site wiring
+            try:
+                design.placeCell(cell, new_site, new_bel)
+                cell.getSiteInst().routeSite()
+            except Exception as e:
+                results.append({"cell": cell_name, "status": "error",
+                                "message": f"Placement failed: {e}"})
+                continue
+
+            new_placement = str(new_site.getName())
+            move_distance = old_tile.getManhattanDistance(new_site.getTile())
+            results.append({
+                "cell": cell_name,
+                "status": "success",
+                "old_site": old_placement,
+                "new_site": new_placement,
+                "distance_moved": int(move_distance),
+                "affected_nets": len(affected_net_names),
+                "message": f"Moved from {old_placement} to {new_placement}"
+            })
+
+        success_count = sum(1 for r in results if r["status"] == "success")
+
+        return {
+            "status": "success",
+            "cells_processed": len(cells_to_process),
+            "cells_moved": success_count,
+            "results": results,
+            "message": (f"Re-placed {success_count}/{len(cells_to_process)} cells. "
+                        "Affected nets need re-routing in Vivado via route_design.")
+        }
+
+    except Exception as e:
+        logger.error(f"Error in cell placement optimization: {e}")
         import traceback
         traceback.print_exc()
         return {"error": str(e)}

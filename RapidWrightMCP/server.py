@@ -340,6 +340,77 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["golden_dcp", "revised_dcp"]
             }
+        ),
+        Tool(
+            name="analyze_net_detour",
+            description="""Cell-centric analysis of routing detours on critical paths.
+            
+            For each interior cell on a critical path, computes the detour ratio
+            of the incoming net (feeding the cell) and the outgoing net (driven
+            by it). A high ratio on either side indicates the cell may benefit
+            from re-placement closer to its connections.
+            
+            Input is a list of pin-path lists as produced by Vivado's
+            extract_critical_path_pins:
+                ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+            Consecutive pins from the same cell are an intra-cell pair.
+            Consecutive pins from different cells span a net segment.
+            
+            Input can be provided directly as critical_paths_data or via a JSON file.
+            Must be called AFTER read_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths_data": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from extract_critical_path_pins. Each path is a list of pin paths like ['src_ff/Q', 'lut/I2', 'lut/O', 'dst_ff/D']."
+                    },
+                    "detour_threshold": {
+                        "type": "number",
+                        "description": "Flag cells with max detour ratio above this value (default: 2.0)",
+                        "default": 2.0
+                    },
+                    "input_file": {
+                        "type": "string",
+                        "description": "Optional: path to JSON file containing critical_paths_data"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="optimize_cell_placement",
+            description="""Re-place cells at the centroid of their connections to reduce routing detours.
+            
+            For each candidate cell:
+            1. Computes the centroid of all connected pin tile locations
+            2. Finds the nearest available SLICE site near the centroid
+            3. Unplaces the cell and unroutes affected nets
+            4. Places the cell at the new site
+            
+            After running, write the checkpoint and load it in Vivado to re-route
+            the unrouted nets with route_design.
+            
+            Must be called AFTER read_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cell_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of cell names to re-place"
+                    },
+                    "max_candidates": {
+                        "type": "integer",
+                        "description": "Maximum number of cells to process (default: 10)",
+                        "default": 10
+                    }
+                },
+                "required": ["cell_names"]
+            }
         )
     ]
 
@@ -434,6 +505,19 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = rw.compare_design_structure(
                 golden_dcp=arguments["golden_dcp"],
                 revised_dcp=arguments["revised_dcp"]
+            )
+        
+        elif name == "analyze_net_detour":
+            result = rw.analyze_net_detour(
+                critical_paths_data=arguments.get("critical_paths_data"),
+                detour_threshold=arguments.get("detour_threshold", 2.0),
+                input_file=arguments.get("input_file")
+            )
+        
+        elif name == "optimize_cell_placement":
+            result = rw.optimize_cell_placement(
+                cell_names=arguments["cell_names"],
+                max_candidates=arguments.get("max_candidates", 10)
             )
         
         else:
