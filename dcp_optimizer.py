@@ -157,6 +157,7 @@ class DCPOptimizerBase:
         self.initial_failing_endpoints = None
         self.high_fanout_nets = []
         self.clock_period = None
+        self.target_clock = None  # Set to clock name (e.g. "clk_fpl26contest") for clock-specific Fmax
         
         # Log file handles
         self._rw_log_file = None
@@ -305,43 +306,105 @@ class DCPOptimizerBase:
     
     async def get_clock_period(self, call_tool_fn) -> Optional[float]:
         """
-        Query the clock period of the critical (worst-slack) clock from Vivado in nanoseconds.
+        Query the clock period of the target clock from Vivado in nanoseconds.
         
-        Uses a Tcl script that finds the endpoint clock of the worst setup timing path
-        and returns its period. This should improve handling of multi-clock designs.
+        First checks for the contest clock 'clk_fpl26contest'. If found, uses its
+        period and sets self.target_clock. Otherwise falls back to the endpoint clock
+        of the worst setup timing path.
         
         Args:
             call_tool_fn: Function to call Vivado tools, should accept (tool_name, arguments)
         
-        Returns the period of the critical clock, or None if no clocks.
+        Returns the period of the target clock, or None if no clocks found.
         """
-        # Get the period of the endpoint clock on the worst setup timing path
         tcl_cmd = (
-            "set tp [get_timing_paths -max_paths 1 -setup]; "
-            "if {$tp ne {}} { "
-            "  set clk [get_property ENDPOINT_CLOCK $tp]; "
-            "  if {$clk ne {}} { "
-            "    puts [get_property PERIOD [get_clocks $clk]]; "
+            "set contest_clk [get_clocks -quiet clk_fpl26contest]; "
+            "if {$contest_clk ne {}} { "
+            "  puts \"CLOCK:clk_fpl26contest\"; "
+            "  puts [get_property PERIOD $contest_clk]; "
+            "} else { "
+            "  set tp [get_timing_paths -max_paths 1 -setup]; "
+            "  if {$tp ne {}} { "
+            "    set clk [get_property ENDPOINT_CLOCK $tp]; "
+            "    if {$clk ne {}} { "
+            "      puts \"CLOCK:$clk\"; "
+            "      puts [get_property PERIOD [get_clocks $clk]]; "
+            "    } "
             "  } "
             "}"
         )
         try:
             result = await call_tool_fn("run_tcl", {"command": tcl_cmd})
             
+            clock_name = None
             for token in result.strip().split():
+                if token.startswith('CLOCK:'):
+                    clock_name = token[len('CLOCK:'):]
+                    continue
                 if token.startswith('ERROR') or token.startswith('WARNING'):
                     continue
                 try:
                     period = float(token)
                     if period > 0:
-                        logger.info(f"Critical clock period: {period:.3f} ns")
+                        if clock_name:
+                            self.target_clock = clock_name
+                            logger.info(f"Target clock: {clock_name}, period: {period:.3f} ns")
+                        else:
+                            logger.info(f"Critical clock period: {period:.3f} ns")
                         return period
                 except ValueError:
                     continue
         except Exception as e:
-            logger.warning(f"Failed to get critical clock period: {e}")
+            logger.warning(f"Failed to get clock period: {e}")
         
-        logger.warning("Could not determine critical clock period from Vivado")
+        logger.warning("Could not determine clock period from Vivado")
+        return None
+    
+    async def get_wns_for_target_clock(self, call_tool_fn) -> Optional[float]:
+        """
+        Get WNS specifically for the target clock domain.
+        
+        When target_clock is set (e.g. 'clk_fpl26contest'), queries WNS filtered
+        to that clock's timing paths. Falls back to overall WNS if no target clock.
+        
+        Args:
+            call_tool_fn: Function to call Vivado tools, should accept (tool_name, arguments)
+        
+        Returns WNS in nanoseconds, or None if query fails.
+        """
+        if self.target_clock:
+            tcl_cmd = (
+                f"set clk_obj [get_clocks -quiet {{{self.target_clock}}}]; "
+                f"if {{$clk_obj ne {{}}}} {{ "
+                f"  set tp [get_timing_paths -max_paths 1 -setup -to $clk_obj]; "
+                f"  if {{[llength $tp] > 0}} {{get_property SLACK $tp}} else {{puts 0.0}} "
+                f"}} else {{ "
+                f"  set tp [get_timing_paths -max_paths 1 -slack_lesser_than 999]; "
+                f"  if {{[llength $tp] > 0}} {{get_property SLACK $tp}} else {{puts 0.0}} "
+                f"}}"
+            )
+        else:
+            tcl_cmd = (
+                "set tp [get_timing_paths -max_paths 1 -slack_lesser_than 999]; "
+                "if {[llength $tp] > 0} {get_property SLACK $tp} else {puts 0.0}"
+            )
+        
+        try:
+            result = await call_tool_fn("run_tcl", {"command": tcl_cmd})
+            for token in result.strip().split('\n'):
+                token = token.strip()
+                if not token or token.startswith('ERROR') or token.startswith('WARNING'):
+                    continue
+                try:
+                    wns = float(token)
+                    clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+                    logger.info(f"WNS{clock_info}: {wns:.3f} ns")
+                    return wns
+                except ValueError:
+                    continue
+        except Exception as e:
+            logger.warning(f"Failed to get WNS for target clock: {e}")
+        
         return None
     
     def parse_high_fanout_nets(self, report: str) -> list[tuple[str, int, int]]:
@@ -563,39 +626,50 @@ class DCPOptimizer(DCPOptimizerBase):
             
             # Track WNS from timing reports and get_wns calls
             if tool_name == "vivado_report_timing_summary":
-                timing_info = parse_timing_summary_static(result_text)
-                if timing_info["wns"] is not None:
-                    current_wns = timing_info["wns"]
-                    wns_measured = current_wns  # Store for tracking
-                    current_fmax = self.calculate_fmax(current_wns, self.clock_period)
-                    
-                    # Format fmax string if available
-                    fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
-                    
-                    if current_wns > self.best_wns:
-                        logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
-                        self.best_wns = current_wns
-                    else:
-                        logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                # If target clock is set, get clock-specific WNS instead of overall
+                if self.target_clock:
+                    try:
+                        clock_wns = await super().get_wns_for_target_clock(self._call_vivado_tool)
+                        if clock_wns is not None:
+                            current_wns = clock_wns
+                            wns_measured = current_wns
+                            current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                            fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                            if current_wns > self.best_wns:
+                                logger.info(f"New best WNS (clock: {self.target_clock}): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                                self.best_wns = current_wns
+                            else:
+                                logger.info(f"Current WNS (clock: {self.target_clock}): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                    except Exception as e:
+                        logger.warning(f"Failed to get clock-specific WNS, falling back to overall: {e}")
+                        self.target_clock = None  # Fall through to overall WNS parsing
+                
+                if not self.target_clock or wns_measured is None:
+                    timing_info = parse_timing_summary_static(result_text)
+                    if timing_info["wns"] is not None:
+                        current_wns = timing_info["wns"]
+                        wns_measured = current_wns
+                        current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                        fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                        if current_wns > self.best_wns:
+                            logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                            self.best_wns = current_wns
+                        else:
+                            logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
             
             # Also track WNS from get_wns tool (returns just the numeric WNS value)
             elif tool_name == "vivado_get_wns":
                 try:
-                    # get_wns returns just a number like "-0.099" or "0.016"
                     current_wns = float(result_text.strip())
-                    wns_measured = current_wns  # Store for tracking
+                    wns_measured = current_wns
                     current_fmax = self.calculate_fmax(current_wns, self.clock_period)
-                    
-                    # Format fmax string if available
                     fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
-                    
                     if current_wns > self.best_wns:
                         logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                         self.best_wns = current_wns
                     else:
                         logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                 except (ValueError, AttributeError):
-                    # Could not parse WNS from get_wns output
                     logger.warning(f"Could not parse WNS from get_wns output: {result_text[:100]}")
             
             elapsed_time = time.time() - start_time
@@ -755,21 +829,29 @@ class DCPOptimizer(DCPOptimizerBase):
         
         # Parse timing
         timing_info = parse_timing_summary_static(timing_report)
-        self.initial_wns = timing_info["wns"]
         self.initial_tns = timing_info["tns"]
         self.initial_failing_endpoints = timing_info["failing_endpoints"]
-        self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
         
-        # Get clock period for fmax calculation
+        # Get clock period for fmax calculation (also detects target clock)
         self.clock_period = await super().get_clock_period(self._call_vivado_tool)
         
+        # Get WNS for the target clock domain
+        target_wns = await super().get_wns_for_target_clock(self._call_vivado_tool)
+        if target_wns is not None:
+            self.initial_wns = target_wns
+        else:
+            self.initial_wns = timing_info["wns"]
+        self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
+        
+        clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
         print(f"✓ Timing analyzed:")
         if self.clock_period is not None:
-            target_fmax = 1000.0 / self.clock_period  # MHz
+            target_fmax = 1000.0 / self.clock_period
             print(f"  - Clock period: {self.clock_period:.3f} ns (target fmax: {target_fmax:.2f} MHz)")
+        if self.target_clock:
+            print(f"  - Target clock: {self.target_clock}")
         if self.initial_wns is not None:
-            print(f"  - WNS: {self.initial_wns:.3f} ns")
-            # Calculate and display achievable fmax
+            print(f"  - WNS{clock_info}: {self.initial_wns:.3f} ns")
             initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
             if initial_fmax is not None:
                 print(f"  - Achievable fmax: {initial_fmax:.2f} MHz")
@@ -1393,7 +1475,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         """Query clock period with test-mode logging."""
         period = await super().get_clock_period(self._call_vivado_for_clock)
         if period is not None:
-            print(f"[TEST] Clock period: {period:.3f} ns")
+            clock_info = f" (target clock: {self.target_clock})" if self.target_clock else ""
+            print(f"[TEST] Clock period: {period:.3f} ns{clock_info}")
         else:
             print("[TEST] WARNING: Could not parse clock period from Vivado")
         return period
@@ -1463,13 +1546,20 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Timing summary (first 2000 chars):\n{result[:2000]}...")
             logger.info(f"Initial timing summary: {result}")
             
-            # Parse initial WNS
-            self.initial_wns = self.parse_wns_from_timing_report(result)
-            print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
-            logger.info(f"Initial WNS: {self.initial_wns} ns")
-            
-            # Get clock period for fmax calculation
+            # Get clock period for fmax calculation (also detects target clock)
             self.clock_period = await self.fetch_clock_period()
+            
+            # Get WNS for the target clock domain
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.initial_wns = target_wns
+            else:
+                self.initial_wns = self.parse_wns_from_timing_report(result)
+            
+            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+            print(f"\n*** Initial WNS{clock_info}: {self.initial_wns} ns ***")
+            logger.info(f"Initial WNS{clock_info}: {self.initial_wns} ns")
+            
             if self.clock_period is not None:
                 target_fmax = 1000.0 / self.clock_period
                 print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
@@ -1652,10 +1742,16 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Final timing summary (first 2000 chars):\n{result[:2000]}...")
             logger.info(f"Final timing summary: {result}")
             
-            # Parse final WNS
-            self.final_wns = self.parse_wns_from_timing_report(result)
-            print(f"\n*** Final WNS: {self.final_wns} ns ***")
-            logger.info(f"Final WNS: {self.final_wns} ns")
+            # Get final WNS for the target clock domain
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.final_wns = target_wns
+            else:
+                self.final_wns = self.parse_wns_from_timing_report(result)
+            
+            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+            print(f"\n*** Final WNS{clock_info}: {self.final_wns} ns ***")
+            logger.info(f"Final WNS{clock_info}: {self.final_wns} ns")
             
             # Calculate final fmax
             final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
@@ -1761,13 +1857,20 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Timing summary (first 2000 chars):\n{result[:2000]}...")
             logger.info(f"Initial timing summary: {result}")
             
-            # Parse initial WNS
-            self.initial_wns = self.parse_wns_from_timing_report(result)
-            print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
-            logger.info(f"Initial WNS: {self.initial_wns} ns")
-            
-            # Get clock period for fmax calculation
+            # Get clock period for fmax calculation (also detects target clock)
             self.clock_period = await self.fetch_clock_period()
+            
+            # Get WNS for the target clock domain
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.initial_wns = target_wns
+            else:
+                self.initial_wns = self.parse_wns_from_timing_report(result)
+            
+            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+            print(f"\n*** Initial WNS{clock_info}: {self.initial_wns} ns ***")
+            logger.info(f"Initial WNS{clock_info}: {self.initial_wns} ns")
+            
             if self.clock_period is not None:
                 target_fmax = 1000.0 / self.clock_period
                 print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
@@ -1922,10 +2025,16 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Final timing summary (first 2000 chars):\n{result[:2000]}...")
             logger.info(f"Final timing summary: {result}")
             
-            # Parse final WNS
-            self.final_wns = self.parse_wns_from_timing_report(result)
-            print(f"\n*** Final WNS: {self.final_wns} ns ***")
-            logger.info(f"Final WNS: {self.final_wns} ns")
+            # Get final WNS for the target clock domain
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.final_wns = target_wns
+            else:
+                self.final_wns = self.parse_wns_from_timing_report(result)
+            
+            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+            print(f"\n*** Final WNS{clock_info}: {self.final_wns} ns ***")
+            logger.info(f"Final WNS{clock_info}: {self.final_wns} ns")
             
             # Calculate final fmax
             final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
