@@ -29,10 +29,9 @@ from mcp import ClientSession
 from mcp.client.stdio import stdio_client, StdioServerParameters
 
 # Test checkpoint path - relative to parent directory (downloaded by Makefile)
-# The Makefile downloads logicnets_jscl.dcp to the project root
 SCRIPT_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = SCRIPT_DIR.parent
-TEST_DCP = PROJECT_ROOT / "logicnets_jscl.dcp"
+TEST_DCP = PROJECT_ROOT / "fpl26_contest_benchmarks" / "logicnets_jscl_2025.1.dcp"
 
 # Output directory for written checkpoints and EDIF files
 OUTPUT_DIR = Path(tempfile.gettempdir()) / "vivado_mcp_test"
@@ -154,7 +153,7 @@ async def main():
     # Verify test DCP exists
     if not TEST_DCP.exists():
         print(f"ERROR: Test checkpoint not found: {TEST_DCP}")
-        print(f"Please run 'make setup' in the project root to download example DCPs:")
+        print(f"Please run 'make setup' in the project root to download benchmark DCPs:")
         print(f"  cd {PROJECT_ROOT} && make setup")
         sys.exit(1)
     

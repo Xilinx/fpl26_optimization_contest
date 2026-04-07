@@ -41,10 +41,15 @@ RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
 export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
-# Example DCPs to download
-EXAMPLE_DCP_1 := demo_corundum_25g_misses_timing.dcp
-EXAMPLE_DCP_2 := logicnets_jscl.dcp
-DCP_URL_BASE := http://data.rapidwright.io/example-dcps
+# Benchmark archive from GitHub release
+BENCHMARK_VERSION := v1.0.0
+BENCHMARK_TARBALL := fpl26_contest_benchmarks_$(BENCHMARK_VERSION).tar.gz
+BENCHMARK_DIR := fpl26_contest_benchmarks
+BENCHMARK_URL := https://github.com/Xilinx/fpl26_optimization_contest/releases/download/$(BENCHMARK_VERSION)/$(BENCHMARK_TARBALL)
+
+# Example DCP paths (inside the extracted benchmark directory)
+EXAMPLE_DCP_1 := $(BENCHMARK_DIR)/logicnets_jscl_2025.1.dcp
+EXAMPLE_DCP_2 := $(BENCHMARK_DIR)/vexriscv_re-place_2025.1.dcp
 
 # Colors for output
 COLOR_GREEN := \033[0;32m
@@ -72,9 +77,9 @@ help:
 	@echo "Usage examples:"
 	@echo "  make setup"
 	@echo "  make setup VIVADO_EXEC=/tools/Xilinx/Vivado/2025.2/bin/vivado"
-	@echo "  make run_optimizer DCP=logicnets_jscl.dcp"
-	@echo "  make run_test DCP=logicnets_jscl.dcp"
-	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3"
+	@echo "  make run_optimizer DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp"
+	@echo "  make run_test DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp"
+	@echo "  make run_test DCP=fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp VECTORS=50000"
 	@echo "  make validate_demo"
@@ -99,12 +104,12 @@ setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[1/6] Installing Python dependencies...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[1/5] Installing Python dependencies...$(COLOR_RESET)\n"
 	$(PIP) install -r requirements.txt
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[2/6] Checking Vivado...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[2/5] Checking Vivado...$(COLOR_RESET)\n"
 	@if command -v $(VIVADO_EXEC) >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
@@ -118,7 +123,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[3/6] Checking Java...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[3/5] Checking Java...$(COLOR_RESET)\n"
 	@if command -v java >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Java found: %s$(COLOR_RESET)\n" "$$(command -v java)"; \
 		java -version 2>&1 | head -n 1; \
@@ -151,45 +156,30 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[4/6] Building RapidWright from source...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[4/5] Building RapidWright from source...$(COLOR_RESET)\n"
 	@$(MAKE) build-rapidwright
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[5/6] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
-	@if [ -f "$(EXAMPLE_DCP_1)" ]; then \
-		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_1) already exists$(COLOR_RESET)\n"; \
+	@printf "$(COLOR_YELLOW)[5/5] Downloading and extracting benchmark DCPs...$(COLOR_RESET)\n"
+	@if [ -d "$(BENCHMARK_DIR)" ] && [ -f "$(EXAMPLE_DCP_1)" ]; then \
+		printf "$(COLOR_GREEN)✓ $(BENCHMARK_DIR)/ already exists$(COLOR_RESET)\n"; \
 	else \
-		if command -v wget >/dev/null 2>&1; then \
-			wget -q --show-progress $(DCP_URL_BASE)/$(EXAMPLE_DCP_1); \
-			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_1)$(COLOR_RESET)\n"; \
-		elif command -v curl >/dev/null 2>&1; then \
-			curl -# -O $(DCP_URL_BASE)/$(EXAMPLE_DCP_1); \
-			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_1)$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
-			echo "Please install wget or curl, or manually download:"; \
-			echo "  $(DCP_URL_BASE)/$(EXAMPLE_DCP_1)"; \
-			exit 1; \
+		if [ ! -f "$(BENCHMARK_TARBALL)" ]; then \
+			printf "Downloading $(BENCHMARK_TARBALL)...\n"; \
+			if command -v wget >/dev/null 2>&1; then \
+				wget -q --show-progress $(BENCHMARK_URL); \
+			elif command -v curl >/dev/null 2>&1; then \
+				curl -# -L -O $(BENCHMARK_URL); \
+			else \
+				printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
+				echo "Please install wget or curl, or manually download:"; \
+				echo "  $(BENCHMARK_URL)"; \
+				exit 1; \
+			fi; \
 		fi; \
-	fi
-	@echo ""
-	
-	@printf "$(COLOR_YELLOW)[6/6] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
-	@if [ -f "$(EXAMPLE_DCP_2)" ]; then \
-		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_2) already exists$(COLOR_RESET)\n"; \
-	else \
-		if command -v wget >/dev/null 2>&1; then \
-			wget -q --show-progress $(DCP_URL_BASE)/$(EXAMPLE_DCP_2); \
-			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_2)$(COLOR_RESET)\n"; \
-		elif command -v curl >/dev/null 2>&1; then \
-			curl -# -O $(DCP_URL_BASE)/$(EXAMPLE_DCP_2); \
-			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_2)$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
-			echo "Please install wget or curl, or manually download:"; \
-			echo "  $(DCP_URL_BASE)/$(EXAMPLE_DCP_2)"; \
-			exit 1; \
-		fi; \
+		printf "Extracting $(BENCHMARK_TARBALL)...\n"; \
+		tar xzf $(BENCHMARK_TARBALL); \
+		printf "$(COLOR_GREEN)✓ Benchmarks extracted to $(BENCHMARK_DIR)/$(COLOR_RESET)\n"; \
 	fi
 	@echo ""
 	
@@ -199,6 +189,7 @@ setup:
 	@echo ""
 	@echo "  Test mode (no API key required):"
 	@echo "    make run_test DCP=$(EXAMPLE_DCP_1)"
+	@echo "    make run_test DCP=$(EXAMPLE_DCP_2)"
 	@echo ""
 	@echo "  Full LLM-guided optimizer (requires OPENROUTER_API_KEY):"
 	@echo "    make run_optimizer DCP=$(EXAMPLE_DCP_1)"
@@ -255,11 +246,11 @@ run_optimizer:
 run_test:
 	@if [ -z "$(DCP)" ]; then \
 		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
-		echo "Usage: make run_test DCP=input.dcp [MAX_NETS=5]"; \
+		echo "Usage: make run_test DCP=input.dcp"; \
 		echo ""; \
 		echo "Supported example DCPs:"; \
-		echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp   # High fanout optimization"; \
-		echo "  make run_test DCP=logicnets_jscl.dcp                    # Pblock optimization"; \
+		echo "  make run_test DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp      # Pblock optimization"; \
+		echo "  make run_test DCP=fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp   # Cell re-placement"; \
 		exit 1; \
 	fi
 	@if [ ! -f "$(DCP)" ]; then \
@@ -381,7 +372,7 @@ veryclean: clean
 	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Removed __pycache__ directories"
-	@# Remove example DCPs
-	@rm -f $(EXAMPLE_DCP_1) $(EXAMPLE_DCP_2)
-	@echo "Removed example DCPs"
+	@# Remove benchmark directory and tarball
+	@rm -rf $(BENCHMARK_DIR) $(BENCHMARK_TARBALL)
+	@echo "Removed benchmark directory and tarball"
 	@printf "$(COLOR_GREEN)✓ Deep clean complete$(COLOR_RESET)\n"

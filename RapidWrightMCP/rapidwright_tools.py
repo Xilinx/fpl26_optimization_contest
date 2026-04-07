@@ -1552,7 +1552,7 @@ def analyze_net_detour(
                                         ratio = cr
                 cell_analysis = {
                     "path": path_idx + 1,
-                    "cell": in_pin.getFullHierarchicalInst().toString(),
+                    "cell": str(in_pin.getFullHierarchicalInst().toString()),
                     "max_detour_ratio": round(ratio, 2),
                 }
                 all_cells.append(cell_analysis)

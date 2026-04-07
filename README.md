@@ -73,15 +73,15 @@ The agent uses two MCP servers that enable AI assistants to interact with FPGA d
 The fastest way to get started is with the Makefile:
 
 ```bash
-# 1. Run setup (installs dependencies, downloads example DCPs)
+# 1. Run setup (installs dependencies, downloads benchmark DCPs)
 make setup
 
 # 2a. Run in test mode (no API key required)
-make run_test DCP=demo_corundum_25g_misses_timing.dcp
+make run_test DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
 
 # 2b. Or run the full LLM-guided optimizer (requires API key)
 export OPENROUTER_API_KEY="<your_key_here>"
-make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
+make run_optimizer DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
 ```
 
 See the [Running the Optimizer](#running-the-optimizer) section for more details.
@@ -103,7 +103,7 @@ The easiest way to set up the project is using the provided Makefile:
 git clone --recursive https://github.com/Xilinx/fpl26_optimization_contest.git
 cd fpl26_optimization_contest
 
-# Run setup (installs deps, builds RapidWright, checks Vivado/Java, downloads example DCPs)
+# Run setup (installs deps, builds RapidWright, checks Vivado/Java, downloads benchmark DCPs)
 make setup
 
 # If Vivado is not on your PATH, specify it when running make:
@@ -119,7 +119,7 @@ The `make setup` command will:
 - Check if Vivado is available (and provide instructions if not)
 - Check for Java, or locate Java from the Vivado installation
 - Build RapidWright from the `RapidWright/` git submodule source
-- Download example DCPs: `demo_corundum_25g_misses_timing.dcp` and `logicnets_jscl.dcp`
+- Download and extract benchmark DCPs into `fpl26_contest_benchmarks/`
 
 #### Manual Installation
 
@@ -142,9 +142,9 @@ export CLASSPATH=$RAPIDWRIGHT_PATH/bin:$RAPIDWRIGHT_PATH/jars/*
 # Verify Java is available (required for RapidWright)
 java -version
 
-# Download example DCPs
-wget http://data.rapidwright.io/example-dcps/demo_corundum_25g_misses_timing.dcp
-wget http://data.rapidwright.io/example-dcps/logicnets_jscl.dcp
+# Download and extract benchmark DCPs
+wget https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.0.0/fpl26_contest_benchmarks_v1.0.0.tar.gz
+tar xzf fpl26_contest_benchmarks_v1.0.0.tar.gz
 ```
 
 **Important: Set JAVA_HOME**
@@ -184,13 +184,12 @@ The Makefile provides convenient targets for running the optimizer:
 
 ```bash
 # Test mode: no API key required, uses hardcoded optimization flow
-make run_test DCP=demo_corundum_25g_misses_timing.dcp
-make run_test DCP=logicnets_jscl.dcp
-make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3
+make run_test DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
+make run_test DCP=fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp
 
 # Full agent mode: LLM-guided optimization (requires OPENROUTER_API_KEY)
 export OPENROUTER_API_KEY="<your_key_here>"
-make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
+make run_optimizer DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
 ```
 
 Both targets will:
@@ -202,63 +201,54 @@ Both targets will:
 | Target | Description |
 |--------|-------------|
 | `make help` | Show available targets and usage (default) |
-| `make setup` | Install dependencies, build RapidWright, check tools, download example DCPs |
+| `make setup` | Install dependencies, build RapidWright, check tools, download benchmark DCPs |
 | `make build-rapidwright` | Build RapidWright from source (git submodule); re-run after modifying RapidWright code |
 | `make run_test DCP=<file>` | Run optimizer in test mode — no LLM required (supports `MAX_NETS` option) |
 | `make run_optimizer DCP=<file>` | Run LLM-guided optimizer (requires `OPENROUTER_API_KEY`) |
 | `make clean` | Remove run directories and .Xil directories (preserves optimized DCPs) |
-| `make veryclean` | Deep clean including example DCPs and Python cache |
+| `make veryclean` | Deep clean including benchmark DCPs and Python cache |
 
 ### Test Mode (No LLM Required)
 
-Test mode runs a deterministic optimization flow without using an LLM, useful for debugging and verifying the MCP servers work correctly. The test mode automatically detects which example DCP is being used and applies the appropriate optimization strategy:
+Test mode runs a deterministic optimization flow without using an LLM, useful for debugging and verifying the MCP servers work correctly. The test mode detects which benchmark DCP is being used and applies the appropriate optimization:
 
 | DCP File | Optimization Strategy |
 |----------|----------------------|
-| `demo_corundum_25g_misses_timing.dcp` | High fanout net optimization |
-| `logicnets_jscl.dcp` | Pblock-based re-placement |
+| `fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp` | Pblock-based re-placement |
+| `fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp` | Critical path cell re-placement (same recipe as [docs/optimization_example.md](docs/optimization_example.md)) |
 
 ```bash
-# Corundum: High fanout optimization flow
-python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
-
 # LogicNets: Pblock optimization flow
-python3 dcp_optimizer.py logicnets_jscl.dcp --test
+python3 dcp_optimizer.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp --test
 
-# Or specify custom output name
-python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --output optimized_output.dcp --test
+# VexRiscv: Cell re-placement flow (mirrors docs/optimization_example.md)
+python3 dcp_optimizer.py fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp --test
 ```
-
-**Note:** Test mode only works with the two example DCPs. For other designs, use the full agent mode (LLM-guided) which can analyze the design and select the appropriate optimization strategy.
-
-#### Corundum Optimization Flow (High Fanout)
-
-For `demo_corundum_25g_misses_timing.dcp`, the test mode:
-1. Opens the DCP and reports initial timing
-2. Identifies high fanout nets on critical paths
-3. Uses RapidWright to replicate drivers and split fanout
-4. Routes the optimized design in Vivado
-5. Reports timing improvement
 
 #### LogicNets Optimization Flow (Pblock)
 
-For `logicnets_jscl.dcp`, the test mode:
-1. Opens the DCP and reports initial timing
+1. Opens the DCP and reports initial Fmax
 2. Extracts critical path cells and analyzes their spread
-3. Analyzes FPGA fabric to find optimal pblock region
-4. Unplaces the design and applies a pblock constraint
-5. Re-places and routes within the constrained region
-6. Reports timing improvement
+3. Unplaces the design and applies a pblock constraint
+4. Re-places and routes within the constrained region
+5. Reports Fmax improvement
+
+#### VexRiscv Optimization Flow (Cell Re-Placement)
+
+Runs the same recipe as the [optimization example](docs/optimization_example.md):
+1. Opens the DCP in Vivado and reports baseline Fmax
+2. Extracts critical path pins and analyzes net detour ratios in RapidWright
+3. Moves poorly-placed cells to the centroid of their connections
+4. Routes the optimized design in Vivado and measures Fmax improvement
+
+For other designs, use the full agent mode (LLM-guided) which can analyze the design and select the appropriate optimization strategy.
 
 #### Test Mode Options
 
 ```bash
-# Optimize with up to 3 high-fanout nets (Corundum only, default is 5)
-python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
-
 # Enable debug mode (verbose logging, preserve all files)
-python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --debug
-python3 dcp_optimizer.py logicnets_jscl.dcp --test --debug
+python3 dcp_optimizer.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp --test --debug
+python3 dcp_optimizer.py fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp --test --debug
 ```
 
 ### Full Agent Mode (Requires LLM)
@@ -286,8 +276,8 @@ python3 dcp_optimizer.py input.dcp --model anthropic/claude-sonnet-4
 | `--api-key` | OpenRouter API key | `OPENROUTER_API_KEY` env var |
 | `--model` | LLM model to use | `x-ai/grok-4.1-fast` |
 | `--debug` | Enable debug mode (verbose logging, preserve all files) | False |
-| `--test` | Test mode: run without LLM. Auto-detects DCP type and applies appropriate optimization (high fanout for Corundum, pblock for LogicNets) | False |
-| `--max-nets` | Max high-fanout nets to optimize in test mode (Corundum only) | 5 |
+| `--test` | Test mode: run without LLM. Pblock for LogicNets, cell re-placement for VexRiscv | False |
+| `--max-nets` | Max high-fanout nets to optimize in test mode (high fanout flow only) | 5 |
 
 ## Validating Optimized Designs
 
@@ -322,10 +312,10 @@ python3 validate_dcps.py golden.dcp optimized.dcp --debug
 
 ```bash
 # First, optimize a design
-python3 dcp_optimizer.py logicnets_jscl.dcp --output logicnets_jscl_optimized.dcp
+python3 dcp_optimizer.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp --output logicnets_jscl_optimized.dcp
 
 # Then validate the optimized design
-python3 validate_dcps.py logicnets_jscl.dcp logicnets_jscl_optimized.dcp
+python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logicnets_jscl_optimized.dcp
 
 # Output:
 # ======================================================================
@@ -687,84 +677,62 @@ The agent automatically selects the best strategy based on design analysis:
 ### Using the Makefile
 
 ```
-$ make run_optimizer DCP=demo_corundum_25g_misses_timing.dcp
+$ make run_test DCP=fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
 
-===== FPGA Design Optimization Setup =====
-
-[1/5] Installing Python dependencies...
-✓ Python dependencies installed
-
-[2/5] Checking Vivado...
-✓ Vivado found: /opt/Xilinx/2025.1/Vivado/bin/vivado
-vivado v2025.1 (64-bit)
-
-[3/5] Checking Java...
-✓ Java found: /home/user/tools/jdk-17.0.7+7/bin/java
-openjdk version "17.0.7" 2023-04-18
-
-[4/5] Downloading example DCP: demo_corundum_25g_misses_timing.dcp...
-✓ demo_corundum_25g_misses_timing.dcp already exists
-
-[5/5] Downloading example DCP: logicnets_jscl.dcp...
-✓ logicnets_jscl.dcp already exists
-
-===== Setup Complete! =====
-
-Running optimizer on demo_corundum_25g_misses_timing.dcp...
+Running optimizer in TEST MODE on fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp...
 
 FPGA Design Optimization - TEST MODE
 =====================================
-Input:       /path/to/demo_corundum_25g_misses_timing.dcp
-Output:      /path/to/demo_corundum_25g_misses_timing_optimized-20260119_143022.dcp
-Run dir:     /path/to/dcp_optimizer_run-20260119_143022
+Input:       /path/to/fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
+Output:      /path/to/fpl26_contest_benchmarks/logicnets_jscl_2025.1_optimized-20260407_143022.dcp
+Run dir:     /path/to/dcp_optimizer_run-20260407_143022
 ...
 ```
 
 ### Using Python Directly
 
 ```
-$ python3 dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test
+$ python3 dcp_optimizer.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp --test
 
 FPGA Design Optimization - TEST MODE
 =====================================
-Input:       /path/to/demo_corundum_25g_misses_timing.dcp
-Output:      /path/to/demo_corundum_25g_misses_timing_optimized-20260119_143022.dcp
-Run dir:     /path/to/dcp_optimizer_run-20260119_143022
-Max nets to optimize: 5
+Input:       /path/to/fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp
+Output:      /path/to/fpl26_contest_benchmarks/logicnets_jscl_2025.1_optimized-<timestamp>.dcp
+Run dir:     /path/to/dcp_optimizer_run-<timestamp>
 
-[TEST] Log files in dcp_optimizer_run-20260119_143022/: rapidwright.log, rapidwright-mcp.log, vivado.log, vivado.jou, vivado-mcp.log
+[TEST] Detected LogicNets design - using pblock optimization flow
 [TEST] Starting RapidWright MCP server...
-[TEST] RapidWright MCP server started in 3.45s
 [TEST] Starting Vivado MCP server...
-[TEST] Vivado MCP server started in 45.23s
+[TEST] Both MCP servers connected successfully
 
+STEP 0: Initialize RapidWright
 STEP 1: Open input DCP in Vivado
-[TEST] Calling vivado_open_checkpoint...
-[TEST] vivado_open_checkpoint completed in 120.34s
+STEP 2: Report initial timing in Vivado
+*** Initial Fmax (clock: clk_fpl26contest): 403.55 MHz (WNS: -0.978 ns) ***
 
-STEP 2: Report timing in Vivado
-[TEST] vivado_report_timing_summary completed in 23.45s
-*** Initial WNS: -0.234 ns ***
+STEP 3: Extract critical path cells
+STEP 4: Analyze critical path spread in RapidWright
+STEP 5: Apply pblock for LogicNets
+STEP 6: Unplace the design in Vivado
+STEP 7: Create and apply pblock to entire design
+STEP 8: Place the design in Vivado
+STEP 9: Route the design in Vivado
+STEP 10: Report final timing
+*** Final Fmax (clock: clk_fpl26contest): 521.10 MHz (WNS: -0.419 ns) ***
+*** Fmax: 403.55 -> 521.10 MHz (+117.55 MHz, +29.1%) ***
 
-STEP 3: Get critical high fanout nets
-Found 8 high fanout nets:
-  - core_inst/pcie_inst/.../tvalid (fanout=267, paths=6)
-  ...
-
-STEP 5: Apply fanout optimizations in RapidWright
-[1/5] Optimizing net: core_inst/pcie_inst/.../tvalid
-    Fanout: 267, Split factor: 2
-    Result: Successfully split net...
-
-...
-
-TEST SUMMARY
 ======================================================================
-Total elapsed time: 892.45s
-Initial WNS: -0.234 ns
-Final WNS:   -0.089 ns
-WNS Change:  +0.145 ns
-Nets optimized: 5/5
+TEST SUMMARY - LOGICNETS PBLOCK OPTIMIZATION
+======================================================================
+Total runtime: 664.86 seconds (11.08 minutes)
+
+Fmax Results:
+  Target Fmax:           666.67 MHz  (clock period: 1.500 ns)
+  Initial Fmax:          403.55 MHz  (WNS: -0.978 ns)
+  Final Fmax:            521.10 MHz  (WNS: -0.419 ns)
+  Fmax Improvement:     +117.55 MHz  (WNS: +0.559 ns)
+
+Pblock applied: SLICE_X55Y60:SLICE_X111Y254
 ======================================================================
 ```
 
@@ -804,7 +772,7 @@ The Makefile provides clean targets to remove generated files:
 # Remove run directories and .Xil directories (preserves optimized DCPs)
 make clean
 
-# Deep clean: also remove example DCPs and Python cache
+# Deep clean: also remove benchmark DCPs and Python cache
 make veryclean
 ```
 

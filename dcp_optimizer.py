@@ -495,21 +495,39 @@ class DCPOptimizerBase:
         
         initial_fmax = self.calculate_fmax(initial_wns, clock_period)
         final_fmax = self.calculate_fmax(final_wns, clock_period)
-        wns_improvement = final_wns - initial_wns
         
         if initial_fmax is not None and final_fmax is not None:
             fmax_improvement = final_fmax - initial_fmax
-            print(f"\n*** Fmax Change: {fmax_improvement:+.2f} MHz ({initial_fmax:.2f} -> {final_fmax:.2f} MHz) ***")
-            print(f"*** WNS Change: {wns_improvement:+.3f} ns ({initial_wns:.3f} -> {final_wns:.3f} ns) ***")
+            pct = (fmax_improvement / initial_fmax) * 100 if initial_fmax else 0
+            print(f"\n*** Fmax: {initial_fmax:.2f} -> {final_fmax:.2f} MHz ({fmax_improvement:+.2f} MHz, {pct:+.1f}%) ***")
+            print(f"*** WNS:  {initial_wns:.3f} -> {final_wns:.3f} ns ***")
+            if fmax_improvement > 0:
+                print(f"IMPROVEMENT: Fmax improved by {fmax_improvement:.2f} MHz")
+            elif fmax_improvement < 0:
+                print(f"REGRESSION: Fmax got worse by {-fmax_improvement:.2f} MHz")
+            else:
+                print("NO CHANGE: Fmax is the same")
         else:
-            print(f"\n*** WNS Change: {wns_improvement:+.3f} ns ***")
-        
-        if wns_improvement > 0:
-            print(f"IMPROVEMENT: Timing improved by {wns_improvement:.3f} ns")
-        elif wns_improvement < 0:
-            print(f"REGRESSION: Timing got worse by {-wns_improvement:.3f} ns")
+            wns_improvement = final_wns - initial_wns
+            print(f"\n*** WNS: {initial_wns:.3f} -> {final_wns:.3f} ns ({wns_improvement:+.3f} ns) ***")
+            if wns_improvement > 0:
+                print(f"IMPROVEMENT: WNS improved by {wns_improvement:.3f} ns")
+            elif wns_improvement < 0:
+                print(f"REGRESSION: WNS got worse by {-wns_improvement:.3f} ns")
+            else:
+                print("NO CHANGE")
+    
+    def print_fmax_status(self, label: str, wns: Optional[float]):
+        """Print Fmax (primary) and WNS (secondary) for a given measurement point."""
+        if wns is None:
+            print(f"*** {label}: WNS unknown ***")
+            return
+        fmax = self.calculate_fmax(wns, self.clock_period)
+        clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
+        if fmax is not None:
+            print(f"*** {label} Fmax{clock_info}: {fmax:.2f} MHz (WNS: {wns:.3f} ns) ***")
         else:
-            print("NO CHANGE: Timing is the same")
+            print(f"*** {label} WNS{clock_info}: {wns:.3f} ns ***")
     
     def print_test_summary(
         self,
@@ -1556,17 +1574,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             else:
                 self.initial_wns = self.parse_wns_from_timing_report(result)
             
-            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
-            print(f"\n*** Initial WNS{clock_info}: {self.initial_wns} ns ***")
-            logger.info(f"Initial WNS{clock_info}: {self.initial_wns} ns")
-            
-            if self.clock_period is not None:
-                target_fmax = 1000.0 / self.clock_period
-                print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
-                
-                initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
-                if initial_fmax is not None:
-                    print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
+            self.print_fmax_status("Initial", self.initial_wns)
+            logger.info(f"Initial WNS: {self.initial_wns} ns")
             print()
             
             # ================================================================
@@ -1732,7 +1741,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             logger.info(f"Route status after routing: {result}")
             
             # ================================================================
-            # Step 9: Report timing and compare WNS
+            # Step 9: Report final timing
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 9: Report final timing")
@@ -1749,14 +1758,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             else:
                 self.final_wns = self.parse_wns_from_timing_report(result)
             
-            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
-            print(f"\n*** Final WNS{clock_info}: {self.final_wns} ns ***")
-            logger.info(f"Final WNS{clock_info}: {self.final_wns} ns")
-            
-            # Calculate final fmax
-            final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
-            if final_fmax is not None:
-                print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
+            self.print_fmax_status("Final", self.final_wns)
+            logger.info(f"Final WNS: {self.final_wns} ns")
             print()
             
             # ================================================================
@@ -1809,6 +1812,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         9. Route the design in Vivado
         10. Report timing in Vivado (compare against initial WNS)
         """
+        pblock_ranges = "SLICE_X55Y60:SLICE_X111Y254"
+        
         print("\n" + "="*70)
         print("FPGA OPTIMIZER TEST MODE - LOGICNETS PBLOCK FLOW")
         print("="*70)
@@ -1867,17 +1872,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             else:
                 self.initial_wns = self.parse_wns_from_timing_report(result)
             
-            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
-            print(f"\n*** Initial WNS{clock_info}: {self.initial_wns} ns ***")
-            logger.info(f"Initial WNS{clock_info}: {self.initial_wns} ns")
-            
-            if self.clock_period is not None:
-                target_fmax = 1000.0 / self.clock_period
-                print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
-                
-                initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
-                if initial_fmax is not None:
-                    print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
+            self.print_fmax_status("Initial", self.initial_wns)
+            logger.info(f"Initial WNS: {self.initial_wns} ns")
             print()
             
             # ================================================================
@@ -1923,35 +1919,13 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"\n*** Pblock optimization {'RECOMMENDED' if pblock_recommended else 'may not be needed'} ***")
             
             # ================================================================
-            # Step 5: Use known-optimal pblock for LogicNets design
+            # Step 5: Apply pblock constraint for LogicNets
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 5: Use known-optimal pblock for LogicNets")
+            print("STEP 5: Apply pblock for LogicNets")
             print("-"*60)
             
-            # For the LogicNets test design, we use a known-optimal pblock range
-            # that was determined through empirical testing to achieve timing closure.
-            # This pblock constrains the design to a contiguous region that minimizes
-            # routing delays by keeping cells close together.
-            #
-            # The LogicNets design characteristics:
-            # - ~24K LUTs, ~1.6K FFs
-            # - Neural network with 4 layer stages
-            # - Critical paths span multiple layers with high fanout
-            #
-            # Optimal pblock: SLICE_X55Y60:SLICE_X111Y254
-            # - Width: 57 SLICE columns (adequate for ~24K LUTs)
-            # - Height: 195 SLICE rows (covers the layer pipeline)
-            # - Position: Centered in a good fabric region avoiding I/O columns
-            
-            pblock_ranges = "SLICE_X55Y60:SLICE_X111Y254"
-            
-            print(f"Using known-optimal pblock range for LogicNets design:")
-            print(f"  Pblock: {pblock_ranges}")
-            print(f"  Width:  57 SLICE columns (X55 to X111)")
-            print(f"  Height: 195 SLICE rows (Y60 to Y254)")
-            print(f"\nThis pblock was empirically determined to achieve timing closure")
-            print(f"by constraining the spread-out design to a compact region.")
+            print(f"Using pblock range: {pblock_ranges}")
             
             # ================================================================
             # Step 6: Unplace the design in Vivado
@@ -2032,14 +2006,8 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             else:
                 self.final_wns = self.parse_wns_from_timing_report(result)
             
-            clock_info = f" (clock: {self.target_clock})" if self.target_clock else ""
-            print(f"\n*** Final WNS{clock_info}: {self.final_wns} ns ***")
-            logger.info(f"Final WNS{clock_info}: {self.final_wns} ns")
-            
-            # Calculate final fmax
-            final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
-            if final_fmax is not None:
-                print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
+            self.print_fmax_status("Final", self.final_wns)
+            logger.info(f"Final WNS: {self.final_wns} ns")
             print()
             
             # ================================================================
@@ -2076,6 +2044,190 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Exception: {type(e).__name__}: {e}")
             return False
 
+    async def run_test_vexriscv(self, input_dcp: Path, output_dcp: Path) -> bool:
+        """
+        Cell re-placement optimization flow for VexRiscv.
+        
+        Mirrors the script in docs/optimization_example.md:
+          Step 1 — Vivado baseline (open, get Fmax, extract critical path pins)
+          Step 2 — RapidWright analysis (analyze_net_detour, filter candidates)
+          Step 3 — RapidWright optimization (optimize_cell_placement, write DCP)
+          Step 4 — Vivado verification (open optimized DCP, route, measure Fmax)
+        """
+        overall_start = time.time()
+        
+        try:
+            # ==============================================================
+            # Step 1: Vivado baseline
+            # ==============================================================
+            print("=" * 60)
+            print("Step 1  Vivado baseline")
+            print("=" * 60)
+            
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            logger.info(f"Open checkpoint result: {result}")
+            
+            self.clock_period = await self.fetch_clock_period()
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.initial_wns = target_wns
+            else:
+                ts = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+                self.initial_wns = self.parse_wns_from_timing_report(ts)
+            
+            baseline_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+            print(f"  Clock period:   {self.clock_period} ns")
+            print(f"  Baseline WNS:   {self.initial_wns} ns")
+            if baseline_fmax is not None:
+                print(f"  Baseline Fmax:  {baseline_fmax:.2f} MHz")
+            
+            pins_file = Path(self.temp_dir) / "critical_path_pins.json"
+            result = await self.call_vivado_tool("extract_critical_path_pins", {
+                "num_paths": 10,
+                "output_file": str(pins_file)
+            }, timeout=600.0)
+            
+            critical_paths = json.loads(Path(pins_file).read_text()) if pins_file.exists() else json.loads(result)
+            print(f"  Extracted {len(critical_paths)} critical path pin lists")
+            
+            # ==============================================================
+            # Step 2: RapidWright analysis
+            # ==============================================================
+            print("\n" + "=" * 60)
+            print("Step 2  RapidWright analysis")
+            print("=" * 60)
+            
+            result = await self.call_rapidwright_tool("initialize_rapidwright", {
+                "jvm_max_memory": "8G"
+            }, timeout=120.0)
+            logger.info(f"RapidWright init: {result}")
+            
+            result = await self.call_rapidwright_tool("read_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            logger.info(f"RapidWright read checkpoint: {result}")
+            
+            result = await self.call_rapidwright_tool("analyze_net_detour", {
+                "input_file": str(pins_file),
+                "detour_threshold": 2.0
+            }, timeout=300.0)
+            logger.info(f"analyze_net_detour: {result}")
+            
+            analysis = json.loads(result) if isinstance(result, str) else result
+            if "error" in analysis:
+                raise RuntimeError(f"analyze_net_detour failed: {analysis['error']}")
+            candidates = analysis.get("candidates", [])
+            print(f"  Cells analyzed: {analysis.get('cells_analyzed', '?')}")
+            print(f"  Candidates (detour > 2.0): {len(candidates)}")
+            for c in candidates[:5]:
+                print(f"    {str(c['cell']):55s}  ratio={c['max_detour_ratio']}")
+            
+            if not candidates:
+                print("\n  No candidates found — nothing to optimize")
+                self.final_wns = self.initial_wns
+                return True
+            
+            worst_path_cells = list(set(
+                str(c["cell"]) for c in candidates if c.get("path", 0) <= 2
+            ))
+            if not worst_path_cells:
+                worst_path_cells = [str(candidates[0]["cell"])]
+            
+            print(f"\n  Targeting {len(worst_path_cells)} cells on paths 1-2:")
+            for name in worst_path_cells:
+                print(f"    {name}")
+            
+            # ==============================================================
+            # Step 3: RapidWright optimization
+            # ==============================================================
+            print("\n" + "=" * 60)
+            print("Step 3  RapidWright optimization")
+            print("=" * 60)
+            
+            result = await self.call_rapidwright_tool("optimize_cell_placement", {
+                "cell_names": worst_path_cells
+            }, timeout=300.0)
+            logger.info(f"optimize_cell_placement: {result}")
+            
+            opt_result = json.loads(result) if isinstance(result, str) else result
+            for r in opt_result.get("results", []):
+                print(f"  {r['cell']}: {r['status']} — {r['message']}")
+            
+            rw_output = Path(self.temp_dir) / "vexriscv_rw_optimized.dcp"
+            result = await self.call_rapidwright_tool("write_checkpoint", {
+                "dcp_path": str(rw_output)
+            }, timeout=600.0)
+            print(f"  Wrote {rw_output.name}")
+            
+            # ==============================================================
+            # Step 4: Vivado verification
+            # ==============================================================
+            print("\n" + "=" * 60)
+            print("Step 4  Vivado verification")
+            print("=" * 60)
+            
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(rw_output)
+            }, timeout=600.0)
+            logger.info(f"Open optimized checkpoint: {result}")
+            
+            result = await self.call_vivado_tool("route_design", {
+                "directive": "Default"
+            }, timeout=3600.0)
+            logger.info(f"Route design: {result}")
+            
+            route_result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
+            error_match = re.search(r"# of nets with routing errors.*?:\s+(\d+)", route_result)
+            error_count = int(error_match.group(1)) if error_match else -1
+            
+            target_wns = await self.get_wns_for_target_clock(self._call_vivado_for_clock)
+            if target_wns is not None:
+                self.final_wns = target_wns
+            else:
+                ts = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+                self.final_wns = self.parse_wns_from_timing_report(ts)
+            
+            new_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
+            
+            print(f"  Routing errors:  {error_count}")
+            if baseline_fmax is not None and new_fmax is not None:
+                print(f"  Baseline WNS:    {self.initial_wns} ns  →  Fmax {baseline_fmax:.2f} MHz")
+                print(f"  Optimized WNS:   {self.final_wns} ns  →  Fmax {new_fmax:.2f} MHz")
+                delta = new_fmax - baseline_fmax
+                print(f"  Fmax improvement: {delta:+.2f} MHz")
+            else:
+                print(f"  Baseline WNS:  {self.initial_wns} ns")
+                print(f"  Optimized WNS: {self.final_wns} ns")
+            
+            # Write final DCP
+            print(f"\nWriting final DCP to: {output_dcp}")
+            result = await self.call_vivado_tool("write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()),
+                "force": True
+            }, timeout=600.0)
+            
+            # Summary
+            elapsed = time.time() - overall_start
+            cells_info = ", ".join(worst_path_cells)
+            self.print_test_summary(
+                title="TEST SUMMARY - VEXRISCV CELL RE-PLACEMENT",
+                elapsed_seconds=elapsed,
+                initial_wns=self.initial_wns,
+                final_wns=self.final_wns,
+                clock_period=self.clock_period,
+                extra_info=f"Cells re-placed: {cells_info}"
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.exception(f"VexRiscv test failed with exception: {e}")
+            print(f"\n*** TEST FAILED ***")
+            print(f"Exception: {type(e).__name__}: {e}")
+            return False
+
     async def cleanup(self):
         """Clean up resources."""
         print("\n[TEST] Cleaning up...")
@@ -2087,23 +2239,23 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
     """Run the test mode optimization.
     
     Detects which example DCP is being used and applies the appropriate optimization flow:
-    - demo_corundum_25g_misses_timing.dcp: High fanout net optimization flow
-    - logicnets_jscl.dcp: Pblock-based placement optimization flow
+    - logicnets_jscl: Pblock-based placement optimization flow
+    - vexriscv_re-place: Cell re-placement flow (same recipe as docs/optimization_example.md)
     """
     # Detect which DCP is being used based on filename
     dcp_name = input_dcp.name.lower()
     
-    if "corundum" in dcp_name or dcp_name == "demo_corundum_25g_misses_timing.dcp":
-        design_type = "corundum"
-        print(f"[TEST] Detected Corundum design - using high fanout optimization flow")
-    elif "logicnets" in dcp_name or dcp_name == "logicnets_jscl.dcp":
+    if "logicnets" in dcp_name:
         design_type = "logicnets"
         print(f"[TEST] Detected LogicNets design - using pblock optimization flow")
+    elif "vexriscv" in dcp_name:
+        design_type = "vexriscv"
+        print(f"[TEST] Detected VexRiscv design - using cell re-placement flow")
     else:
         print(f"\n[TEST] ERROR: Unsupported DCP file: {input_dcp.name}")
-        print(f"[TEST] Test mode requires one of the two example DCPs:")
-        print(f"[TEST]   - demo_corundum_25g_misses_timing.dcp")
-        print(f"[TEST]   - logicnets_jscl.dcp")
+        print(f"[TEST] Test mode supports these benchmark DCPs:")
+        print(f"[TEST]   - fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp")
+        print(f"[TEST]   - fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp")
         print(f"[TEST]")
         print(f"[TEST] For custom DCPs, run without --test to use the LLM-guided optimizer.")
         return 1
@@ -2113,10 +2265,10 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
     try:
         await tester.start_servers()
         
-        if design_type == "corundum":
-            success = await tester.run_test(input_dcp, output_dcp, max_nets_to_optimize=max_nets)
-        else:  # logicnets
+        if design_type == "logicnets":
             success = await tester.run_test_logicnets(input_dcp, output_dcp)
+        else:
+            success = await tester.run_test_vexriscv(input_dcp, output_dcp)
         
         if success:
             print("\n[TEST] Test completed successfully")
@@ -2152,9 +2304,8 @@ Examples:
   python dcp_optimizer.py input.dcp --output output.dcp
   python dcp_optimizer.py input.dcp --model anthropic/claude-sonnet-4
   python dcp_optimizer.py input.dcp --debug
-  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test  # High fanout optimization
-  python dcp_optimizer.py logicnets_jscl.dcp --test  # Pblock optimization
-  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
+  python dcp_optimizer.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp --test
+  python dcp_optimizer.py fpl26_contest_benchmarks/vexriscv_re-place_2025.1.dcp --test
         """
     )
     parser.add_argument("input_dcp", type=Path, help="Input design checkpoint (.dcp)")
@@ -2185,7 +2336,7 @@ Examples:
     parser.add_argument(
         "--test",
         action="store_true",
-        help="Test mode: run hardcoded optimization flow without LLM. Detects DCP type and applies appropriate optimization: high fanout for Corundum, pblock for LogicNets."
+        help="Test mode: run without LLM. Pblock for LogicNets, cell re-placement for VexRiscv (see docs/optimization_example.md)."
     )
     parser.add_argument(
         "--max-nets",

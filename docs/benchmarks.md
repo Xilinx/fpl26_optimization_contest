@@ -3,7 +3,27 @@
 This page describes the suite of benchmark designs that are used to assess
 contestant performance. The full list of benchmark designs, along with links to
 the original sources and some utilization numbers is provided in the following
-tables:
+tables.
+
+## Download
+
+The benchmark DCP files are available as a single archive from the
+[v1.0.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.0.0):
+
+| File | Size |
+|------|------|
+| [`fpl26_contest_benchmarks_v1.0.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.0.0/fpl26_contest_benchmarks_v1.0.0.tar.gz) | ~511 MB |
+| [`fpl26_contest_benchmarks_v1.0.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.0.0/fpl26_contest_benchmarks_v1.0.0.md5) | checksum |
+
+After downloading, extract the archive in the repository root:
+
+```bash
+tar xzf fpl26_contest_benchmarks_v1.0.0.tar.gz
+```
+
+This creates a `fpl26_contest_benchmarks/` directory containing all 12 benchmark
+DCP files. Alternatively, `make setup` will download and extract the benchmarks
+automatically.
 
 ## Benchmarks published during contest
 
