@@ -1567,8 +1567,8 @@ def analyze_net_detour(
             "cells_analyzed": len(all_cells),
             "candidates_found": len(candidates),
             "detour_threshold": detour_threshold,
-            "candidates": candidates[:20],
-            "all_cells": all_cells[:50],
+            "candidates": candidates,
+            "all_cells": all_cells,
         }
 
     except Exception as e:
