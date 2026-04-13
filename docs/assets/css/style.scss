@@ -74,6 +74,9 @@ nav {
 header {
   ul {
     li {
+      width: auto !important;
+      min-width: 134px;
+      padding: 0 12px !important;
       // Override the button background and borders
       background: linear-gradient(to bottom, lighten($orange, 5%), $orange) !important;
       border: 1px solid $orange-dark !important;
@@ -85,6 +88,8 @@ header {
       
       // Target all links in sidebar (including .listedpages)
       a, a.listedpages {
+        width: auto !important;
+        white-space: nowrap !important;
         background: none !important;
         border: none !important;
         color: white !important;
