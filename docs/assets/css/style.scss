@@ -76,7 +76,8 @@ header {
     li {
       width: auto !important;
       min-width: 134px;
-      padding: 0 12px !important;
+      padding: 4px 12px !important;
+      height: auto !important;
       // Override the button background and borders
       background: linear-gradient(to bottom, lighten($orange, 5%), $orange) !important;
       border: 1px solid $orange-dark !important;
@@ -90,6 +91,8 @@ header {
       a, a.listedpages {
         width: auto !important;
         white-space: nowrap !important;
+        padding: 4px 0 !important;
+        line-height: 1.4 !important;
         background: none !important;
         border: none !important;
         color: white !important;
