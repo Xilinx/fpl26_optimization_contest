@@ -18,10 +18,25 @@ benchmark) when run on the contest [runtime environment](runtime.html).
 
 ## Submission Format
 
-Contestants are required to submit a zip file containing a clone of the contest
-repository which has been modified to run their submission.
-Specifically, organizers must be able to run the submission by calling only
-the `make run-submission` target.  More details to follow.
+Contestants are required to submit an archive containing a clone of the contest
+repository which has been modified to run their submission.  Zip files are
+preferred, but `.tar.gz` archives are also accepted.  The following code block
+illustrates the commands that will be run on the verification instance to
+evaluate a submission:
+
+```
+unzip submission.zip   # or: tar -xzf submission.tar.gz
+cd fpl26_optimization_contest
+make setup
+make run_optimizer DCP=benchmark1.dcp
+make run_optimizer DCP=benchmark2.dcp
+make run_optimizer DCP=...
+```
+
+The `make setup` target is one of the initial steps that teams can update to
+install any additional packages or perform any other one-time preparation
+required before their submission is run.  The `make run_optimizer` target
+will then be invoked once per benchmark DCP in the evaluation suite.
 
 ### Closed-Source Submissions
 
