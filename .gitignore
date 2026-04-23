@@ -2,3 +2,8 @@ __pycache__
 *.dcp
 *.log
 *.jou
+*.txt
+*.tar.gz
+MD5SUM
+
+
