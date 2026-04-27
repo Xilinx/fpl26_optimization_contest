@@ -36,6 +36,12 @@ install any additional packages or perform any other one-time preparation
 required before their submission is run.  The `make run_optimizer` target
 will then be invoked once per benchmark DCP in the evaluation suite.
 
+When `make run_optimizer` is invoked by the organizers, the `OPENROUTER_API_KEY`
+environment variable will be set to a key provisioned by the contest organizers
+with a **$1.00 (USD) spending limit per benchmark**.  Submissions must read
+this environment variable to access OpenRouter and must not bundle, hard-code,
+or otherwise rely on a different API key.
+
 The exact instructions for uploading the submission archive will be emailed
 directly to teams.
 

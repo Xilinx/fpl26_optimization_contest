@@ -6,6 +6,7 @@ For all enquiries, please contact [chris.lavin@amd.com](mailto:chris.lavin@amd.c
 
 * Chris Lavin
 * Eddie Hung
+* Preston Walker
 * Alireza Kaviani
 
 ## Acknowledgements
@@ -20,3 +21,5 @@ The organizers are grateful to the following people for their help in the develo
 - Hugo Andrade
 - Cathal McCabe
 - Andy Schmidt
+- Andrew Butt
+

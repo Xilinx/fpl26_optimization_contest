@@ -12,7 +12,7 @@ benchmark) when run on the contest [runtime environment](runtime.html).
 
 ## Key Details
 
-* Alpha submission is mandatory for continued participation in the contest
+* Alpha submission is mandatory for continued participation in the contest but no teams will be eliminated that create a submission
 * Performance of alpha submissions will be shared privately with contestants and will not impact the final score
 * Alpha submissions will be evaluated on the contest [runtime environment](runtime.html)
 
@@ -38,6 +38,12 @@ The `make setup` target is one of the initial steps that teams can update to
 install any additional packages or perform any other one-time preparation
 required before their submission is run.  The `make run_optimizer` target
 will then be invoked once per benchmark DCP in the evaluation suite.
+
+When `make run_optimizer` is invoked by the organizers, the `OPENROUTER_API_KEY`
+environment variable will be set to a key provisioned by the contest organizers
+with a **$1.00 (USD) spending limit per benchmark**.  Submissions must read
+this environment variable to access OpenRouter and must not bundle, hard-code,
+or otherwise rely on a different API key.
 
 The exact instructions for uploading the submission archive will be emailed
 directly to teams.
