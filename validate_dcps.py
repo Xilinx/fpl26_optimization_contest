@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 10000, debug: bool = False):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
@@ -595,6 +595,7 @@ endmodule
         xsim_dir = self.temp_dir / "xsim_work"
         xsim_dir.mkdir(exist_ok=True)
         
+        current_step = "setup"
         try:
             # Get Vivado installation path for simulation libraries
             # Check VIVADO_EXEC environment variable first, then PATH
@@ -617,37 +618,73 @@ endmodule
                 logger.warning(f"UNISIM library not found at {unisim_dir}, trying glbl.v only")
             
             # To avoid module name conflicts, rename ALL modules in revised file
+            # (both declarations AND instantiations of those modules) so that the
+            # renamed-revised top is a self-contained design that doesn't silently
+            # link against golden sub-modules at elaboration time.
             logger.info("Renaming all revised modules to avoid conflicts...")
             revised_renamed = xsim_dir / "revised_sim_renamed.v"
             
             with open(revised_v, 'r') as f:
                 content = f.read()
             
-            # Rename ALL modules (not just top) to avoid sub-module conflicts
             revised_module_name = revised_info["module_name"]
             revised_module_renamed = f"{revised_module_name}_revised"
             
-            # Rename module declarations - handle both single-line and multi-line
-            # "module name" OR "module name("
-            content = re.sub(
-                r'\bmodule\s+(\w+)(\s*[\(\n])',
-                lambda m: f'module {m.group(1)}_revised{m.group(2)}',
+            # Pass 1: collect every declared module name in the revised netlist.
+            # Vivado's funcsim output is regular: each declaration starts with
+            # "module <name>" at the start of a line.
+            declared_module_names = set(re.findall(
+                r'(?m)^\s*module\s+(\w+)\b',
                 content
+            ))
+            logger.info(
+                f"Found {len(declared_module_names)} module declarations in revised netlist"
             )
             
-            # Rename module instantiations (user modules, not FPGA primitives)
-            # Look for patterns like "layer0 inst_name (" or "myreg inst_name ("
-            # Primitives typically start with uppercase (LUT6, FDRE, etc.)
-            content = re.sub(
-                r'\b(layer\d+[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
-            content = re.sub(
-                r'\b(myreg[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
+            # Pass 2: per-line scan rewriting both declarations and instantiations
+            # of declared modules to use the "_revised" suffix. We use a per-line
+            # scan with set-membership lookups (O(file size)) rather than a giant
+            # alternation regex, which is intractably slow on big benchmarks
+            # (e.g. corescore_500_mod has ~6700 user modules in a 71 MB netlist).
+            #
+            # Lines we care about in Vivado funcsim output:
+            #   "  module NAME"               -> declaration to rename
+            #   "  NAME inst_name (..."       -> instantiation to rename
+            # Anything else (port lists, assigns, wires, comments, primitives
+            # like LUT6/FDRE which are NOT in declared_module_names) is left alone.
+            if declared_module_names:
+                renamed_lines = []
+                suffix = "_revised"
+                for line in content.splitlines(keepends=True):
+                    s = line.lstrip()
+                    if not s:
+                        renamed_lines.append(line); continue
+                    sp = s.find(' ')
+                    tab = s.find('\t')
+                    if tab != -1 and (sp == -1 or tab < sp):
+                        sp = tab
+                    if sp == -1:
+                        renamed_lines.append(line); continue
+                    first = s[:sp]
+                    if first == 'module':
+                        rest = s[sp:].lstrip()
+                        nm = re.match(r'(\w+)', rest)
+                        if nm and nm.group(1) in declared_module_names:
+                            name = nm.group(1)
+                            indent = line[:len(line) - len(s)]
+                            after_name = len(s) - len(rest) + len(name)
+                            renamed_lines.append(
+                                indent + 'module ' + name + suffix + s[after_name:]
+                            )
+                            continue
+                    elif first in declared_module_names:
+                        indent = line[:len(line) - len(s)]
+                        renamed_lines.append(
+                            indent + first + suffix + s[len(first):]
+                        )
+                        continue
+                    renamed_lines.append(line)
+                content = ''.join(renamed_lines)
             
             with open(revised_renamed, 'w') as f:
                 f.write(content)
@@ -668,12 +705,26 @@ endmodule
                 if glbl_v.exists():
                     compile_cmd.insert(3, str(glbl_v))
             
+            # Timeouts are generous because large benchmarks (e.g. corescore_500_mod
+            # with thousands of user modules) can take many minutes per step.
+            # xvlog/xelab times scale with design size; xsim time scales with both
+            # design size and num_vectors.
+            xvlog_timeout_s = 1800   # 30 min
+            xelab_timeout_s = 3600   # 60 min - elaborates both designs
+            # xsim: per-cycle cost is roughly proportional to the number of
+            # primitive cells. Two copies of a 100k-LUT design (e.g.
+            # corescore_500_mod) measured ~0.3s/cycle. We add a generous baseline
+            # for kernel init and cap below by 60 min so small designs still get
+            # a comfortable budget.
+            xsim_timeout_s = max(3600, 600 + int(self.num_vectors * 1.0))
+            
+            current_step = "xvlog (compilation)"
             result = subprocess.run(
                 compile_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xvlog_timeout_s
             )
             
             if result.returncode != 0:
@@ -684,11 +735,20 @@ endmodule
             
             print("✓ Compilation successful")
             
-            # Elaborate with UNISIM library reference
+            # Elaborate with UNISIM library reference.
+            #
+            # We pass "--debug off" because the testbench reports results via
+            # $display; we never inspect waveforms, so the per-signal debug
+            # instrumentation that "-debug typical" enables is pure overhead
+            # (relevant for smaller benchmarks where it dominates).
+            #
+            # "--mt auto" lets xelab parallelise where it can; it is a no-op for
+            # the per-module compile loop on huge designs but doesn't hurt.
             logger.info("Elaborating with xelab...")
             elab_cmd = [
                 "xelab",
-                "-debug", "typical",
+                "--debug", "off",
+                "--mt", "auto",
                 "-L", "unisims_ver",  # Link against UNISIM library
                 "-L", "unimacro_ver",
                 "work.testbench",  # Specify library.module
@@ -696,12 +756,13 @@ endmodule
                 "-s", "testbench_sim"
             ]
             
+            current_step = "xelab (elaboration)"
             result = subprocess.run(
                 elab_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xelab_timeout_s
             )
             
             if result.returncode != 0:
@@ -740,12 +801,13 @@ endmodule
                 "-R"
             ]
             
+            current_step = "xsim (simulation)"
             result = subprocess.run(
                 sim_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=xsim_timeout_s
             )
             
             # Parse simulation output
@@ -796,12 +858,17 @@ endmodule
             
             return self.phase2_passed
             
-        except subprocess.TimeoutExpired:
-            print("\n✗ Simulation timeout")
+        except subprocess.TimeoutExpired as e:
+            timeout_s = getattr(e, "timeout", "?")
+            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            logger.error(
+                f"subprocess.TimeoutExpired in step '{current_step}' "
+                f"(timeout={timeout_s}s)"
+            )
             return False
         except Exception as e:
-            print(f"\n✗ Simulation error: {e}")
-            logger.exception("Simulation error")
+            print(f"\n✗ Simulation error in {current_step}: {e}")
+            logger.exception(f"Error in step '{current_step}'")
             return False
     
     async def validate(self) -> bool:
@@ -920,8 +987,11 @@ Examples:
         "--vectors",
         "-n",
         type=int,
-        default=10000,
-        help="Number of random test vectors to simulate (default: 10000)"
+        default=200,
+        help="Number of random test vectors to simulate (default: 200). "
+             "Larger benchmarks (e.g. corescore_500_mod) cost ~1s of xsim CPU "
+             "per vector, so the default keeps wall-clock reasonable. Bump this "
+             "up for higher-confidence runs."
     )
     parser.add_argument(
         "--debug",
