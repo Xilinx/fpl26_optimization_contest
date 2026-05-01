@@ -238,6 +238,116 @@ class DCPValidator:
         
         return False
     
+    # Tcl helper that emits the top-level clock port names of the currently
+    # open design between sentinel markers. Sourced into Vivado on demand.
+    #
+    # Two strategies, applied in order, with results de-duplicated:
+    #   1. ``all_fanin -startpoints_only`` from every pin in the clock
+    #      networks back to primary inputs - this handles the common case
+    #      where create_clock is bound to an internal pin (e.g. a BUFG
+    #      output) rather than a top-level port, which is the case for
+    #      Chisel-style designs (e.g. boom_soc whose clock object source
+    #      is empty but whose actual port is ``clock_uncore_clock``).
+    #   2. Trace primary inputs feeding the I pin of any global clock
+    #      buffer (BUFG*, IBUFG*) - this catches designs that have no
+    #      ``create_clock`` constraints at all but still have a clearly
+    #      identifiable clock input port.
+    #
+    # The marker strings printed at runtime are assembled with ``format``
+    # rather than written as string literals so they don't appear verbatim
+    # in this source - if they did, Vivado's echo of the proc body during
+    # ``source`` would falsely match the Python-side regex.
+    _CLOCK_PORT_DETECT_TCL = r"""
+proc __vd_emit_clock_port {sp seenVar} {
+    upvar 1 $seenVar seen
+    if {[get_property CLASS $sp] ne {port}} { return }
+    if {[get_property DIRECTION $sp] ne {IN}} { return }
+    set nm [get_property NAME $sp]
+    if {[dict exists $seen $nm]} { return }
+    dict set seen $nm 1
+    set bn [get_property BUS_NAME $sp]
+    if {$bn eq {}} { puts $nm } else { puts $bn }
+}
+
+proc __vd_find_clock_ports {} {
+    set seen [dict create]
+    set mB [format {_%s_VDCLKP_%sIN__} {} {BEG}]
+    set mE [format {_%s_VDCLKP_%s__}   {} {ENDX}]
+    puts $mB
+    set clk_pins [get_pins -quiet -of_objects [get_clocks -quiet]]
+    if {[llength $clk_pins] > 0} {
+        foreach sp [all_fanin -quiet -flat -startpoints_only $clk_pins] {
+            __vd_emit_clock_port $sp seen
+        }
+    }
+    foreach c [get_cells -quiet -hier -filter {REF_NAME =~ BUFG* || REF_NAME =~ IBUFG*}] {
+        foreach ipin [get_pins -quiet -of_objects $c -filter {DIRECTION == IN}] {
+            foreach sp [all_fanin -quiet -flat -startpoints_only $ipin] {
+                __vd_emit_clock_port $sp seen
+            }
+        }
+    }
+    puts $mE
+}
+"""
+    
+    async def _query_clock_ports_from_vivado(self) -> list:
+        """Query Vivado for the top-level clock port names of the open design.
+
+        Uses Vivado's clock-network connectivity rather than guessing from
+        port names; see ``_CLOCK_PORT_DETECT_TCL`` for the strategies. Returns
+        an empty list on any failure (caller falls back to a name heuristic),
+        and de-duplicates bus bits like ``clk[0]`` -> ``clk``.
+        """
+        # Write the helper script to disk once and source it on each call.
+        # ``run_tcl`` sends a single line, so a sourced proc keeps the wire
+        # protocol simple (vs. encoding multi-line Tcl with semicolons).
+        helper_path = self.temp_dir / "find_clock_ports.tcl"
+        if not helper_path.exists():
+            with open(helper_path, "w") as f:
+                f.write(self._CLOCK_PORT_DETECT_TCL)
+        
+        cmd = f"source {{{helper_path}}}; __vd_find_clock_ports"
+        try:
+            result = await self.vivado_session.call_tool(
+                "run_tcl", {"command": cmd, "timeout": 120}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to query clock ports from Vivado: {e}")
+            return []
+        
+        if not result.content:
+            return []
+        text = "\n".join(c.text for c in result.content if hasattr(c, 'text'))
+        
+        # Markers must match the dynamic ``format`` calls in the Tcl helper.
+        m = re.search(
+            r'__VDCLKP_BEGIN__\s*(.*?)\s*__VDCLKP_ENDX__',
+            text, re.DOTALL,
+        )
+        if not m:
+            logger.debug(f"Clock-port markers not found in run_tcl output; got: {text[:500]!r}")
+            return []
+        
+        names: list = []
+        seen: set = set()
+        # Valid Verilog port identifiers are word characters; reject anything
+        # that isn't, which filters out Vivado command echo lines (``# ...``),
+        # warning/info banners, and stray punctuation.
+        valid = re.compile(r'^\w+(?:\[\d+\])?$')
+        for line in m.group(1).splitlines():
+            name = line.strip()
+            if not name or not valid.match(name):
+                continue
+            # Strip a single trailing bus index so bit-level port objects
+            # like "clk[0]" collapse to the bus name "clk" we parsed from
+            # the Verilog port list.
+            name = re.sub(r'\[\d+\]$', '', name)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+    
     def get_design_info_from_verilog(self, verilog_path: Path) -> dict:
         """Extract design information from Verilog file (module name, ports)."""
         with open(verilog_path, 'r') as f:
@@ -326,8 +436,16 @@ class DCPValidator:
         else:
             raise ValueError(f"Could not find any module in {verilog_path}")
     
-    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path):
-        """Generate Verilog testbench for comparing two designs."""
+    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path,
+                           clock_names: Optional[list] = None):
+        """Generate Verilog testbench for comparing two designs.
+
+        ``clock_names`` is the authoritative list of top-level clock port names
+        as reported by Vivado's ``get_clocks``/``get_ports`` traversal. When
+        provided we use it directly; otherwise we fall back to a name-based
+        heuristic (which fails for Chisel/Rocket-Chip-style designs whose
+        clocks are named ``clock`` rather than ``clk``).
+        """
         golden_module = golden_info["module_name"]
         revised_module = revised_info["module_name"] + "_revised"  # Use renamed module
         
@@ -339,13 +457,40 @@ class DCPValidator:
             logger.warning("Design has no outputs - simulation will only verify no crashes occur")
             print("⚠ Warning: Design has no outputs - limited verification possible")
         
-        # Filter out clock and reset (we'll drive those separately)
-        regular_inputs = [p for p in inputs if 'clk' not in p['name'].lower() and 'rst' not in p['name'].lower() and 'reset' not in p['name'].lower()]
-        clocks = [p for p in inputs if 'clk' in p['name'].lower()]
+        # Identify clocks. Prefer the constraint-based list from Vivado; fall
+        # back to a broadened substring heuristic only if Vivado gave us
+        # nothing (e.g. an unconstrained design with no SDC).
+        clocks: list = []
+        if clock_names:
+            wanted = set(clock_names)
+            clocks = [p for p in inputs if p['name'] in wanted]
+            missing = wanted - {p['name'] for p in clocks}
+            if missing:
+                logger.warning(
+                    f"Vivado-reported clock ports not found among top-level "
+                    f"inputs: {sorted(missing)}"
+                )
+        if not clocks:
+            if clock_names:
+                logger.warning(
+                    "No Vivado-reported clocks matched top-level inputs; "
+                    "falling back to name-based heuristic"
+                )
+            clocks = [
+                p for p in inputs
+                if 'clk' in p['name'].lower() or 'clock' in p['name'].lower()
+            ]
+        
+        # Reset detection remains heuristic - DCPs do not carry a canonical
+        # "this port is the reset" property the way they do for clocks.
         resets = [p for p in inputs if 'rst' in p['name'].lower() or 'reset' in p['name'].lower()]
         
         if not clocks:
             raise ValueError("No clock signal found in design")
+        
+        # Everything that isn't a clock or reset is driven by the LFSR stimulus.
+        special_names = {p['name'] for p in clocks} | {p['name'] for p in resets}
+        regular_inputs = [p for p in inputs if p['name'] not in special_names]
         
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
@@ -549,6 +694,14 @@ endmodule
         })
         print(f"✓ Golden model exported: {golden_v.name}")
         
+        # Query clock ports while the golden design is still loaded - more
+        # robust than guessing from Verilog port names downstream.
+        golden_clocks = await self._query_clock_ports_from_vivado()
+        if golden_clocks:
+            logger.info(f"Vivado reports golden clock ports: {golden_clocks}")
+        else:
+            logger.info("Vivado reported no clocks for golden design (will fall back to name heuristic)")
+        
         # Open revised DCP
         logger.info(f"Opening revised DCP: {self.revised_dcp}")
         result = await self.vivado_session.call_tool("open_checkpoint", {
@@ -562,6 +715,18 @@ endmodule
             "force": True
         })
         print(f"✓ Revised model exported: {revised_v.name}")
+        
+        # Query clock ports for the revised design as well, mainly so we can
+        # detect mismatches that would invalidate the testbench (the testbench
+        # is built from golden's port list, but revised must agree).
+        revised_clocks = await self._query_clock_ports_from_vivado()
+        if revised_clocks:
+            logger.info(f"Vivado reports revised clock ports: {revised_clocks}")
+        if golden_clocks and revised_clocks and set(golden_clocks) != set(revised_clocks):
+            logger.warning(
+                f"Clock port set differs between golden ({sorted(golden_clocks)}) "
+                f"and revised ({sorted(revised_clocks)}); using golden's"
+            )
         
         # Parse design information
         print("\nParsing design information...")
@@ -585,7 +750,10 @@ endmodule
         # Generate testbench
         tb_path = self.temp_dir / "testbench.v"
         print(f"\nGenerating testbench ({self.num_vectors} random vectors)...")
-        self.generate_testbench(golden_info, revised_info, tb_path)
+        self.generate_testbench(
+            golden_info, revised_info, tb_path,
+            clock_names=golden_clocks,
+        )
         print(f"✓ Testbench generated: {tb_path.name}")
         
         # Run xsim simulation
