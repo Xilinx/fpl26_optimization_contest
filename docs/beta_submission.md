@@ -36,6 +36,31 @@ install any additional packages or perform any other one-time preparation
 required before their submission is run.  The `make run_optimizer` target
 will then be invoked once per benchmark DCP in the evaluation suite.
 
+### Output DCP Location
+
+For each `make run_optimizer DCP=<input>.dcp` invocation, the evaluation
+harness will look for the optimized output in the **same directory as the
+input DCP**, using the filename pattern:
+
+```
+<input_stem>_optimized*.dcp
+```
+
+This matches the default location produced by the example `dcp_optimizer.py`
+(e.g. given `fpl26_contest_benchmarks/benchmark1.dcp`, the default output is
+`fpl26_contest_benchmarks/benchmark1_optimized-<YYYYMMDD_HHMMSS>.dcp`).  A
+fixed filename without a timestamp (e.g. `benchmark1_optimized.dcp`) is
+also accepted.
+
+If multiple files matching this pattern exist in the input directory at the
+end of the run, the **most recently modified** file (by mtime) will be the
+one validated and scored; any others are ignored.  As noted on the
+[Scoring Criteria](score.html) page, the per-benchmark wall-clock runtime
+is capped (see the [runtime environment](runtime.html)), so teams are
+encouraged to overwrite or refresh this output file each time their agent
+finds an improved solution — the last best result on disk is what will be
+scored.
+
 When `make run_optimizer` is invoked by the organizers, the `OPENROUTER_API_KEY`
 environment variable will be set to a key provisioned by the contest organizers
 with a **$1.00 (USD) spending limit per benchmark**.  Submissions must read
