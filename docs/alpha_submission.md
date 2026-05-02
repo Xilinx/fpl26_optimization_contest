@@ -64,6 +64,8 @@ encouraged to overwrite or refresh this output file each time their agent
 finds an improved solution — the last best result on disk is what will be
 scored.
 
+### OpenRouter API Key
+
 When `make run_optimizer` is invoked by the organizers, the `OPENROUTER_API_KEY`
 environment variable will be set to a key provisioned by the contest organizers
 with a **$1.00 (USD) spending limit per benchmark**.  Submissions must read
