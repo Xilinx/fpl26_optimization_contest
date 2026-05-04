@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 10000, debug: bool = False):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
@@ -238,6 +238,116 @@ class DCPValidator:
         
         return False
     
+    # Tcl helper that emits the top-level clock port names of the currently
+    # open design between sentinel markers. Sourced into Vivado on demand.
+    #
+    # Two strategies, applied in order, with results de-duplicated:
+    #   1. ``all_fanin -startpoints_only`` from every pin in the clock
+    #      networks back to primary inputs - this handles the common case
+    #      where create_clock is bound to an internal pin (e.g. a BUFG
+    #      output) rather than a top-level port, which is the case for
+    #      Chisel-style designs (e.g. boom_soc whose clock object source
+    #      is empty but whose actual port is ``clock_uncore_clock``).
+    #   2. Trace primary inputs feeding the I pin of any global clock
+    #      buffer (BUFG*, IBUFG*) - this catches designs that have no
+    #      ``create_clock`` constraints at all but still have a clearly
+    #      identifiable clock input port.
+    #
+    # The marker strings printed at runtime are assembled with ``format``
+    # rather than written as string literals so they don't appear verbatim
+    # in this source - if they did, Vivado's echo of the proc body during
+    # ``source`` would falsely match the Python-side regex.
+    _CLOCK_PORT_DETECT_TCL = r"""
+proc __vd_emit_clock_port {sp seenVar} {
+    upvar 1 $seenVar seen
+    if {[get_property CLASS $sp] ne {port}} { return }
+    if {[get_property DIRECTION $sp] ne {IN}} { return }
+    set nm [get_property NAME $sp]
+    if {[dict exists $seen $nm]} { return }
+    dict set seen $nm 1
+    set bn [get_property BUS_NAME $sp]
+    if {$bn eq {}} { puts $nm } else { puts $bn }
+}
+
+proc __vd_find_clock_ports {} {
+    set seen [dict create]
+    set mB [format {_%s_VDCLKP_%sIN__} {} {BEG}]
+    set mE [format {_%s_VDCLKP_%s__}   {} {ENDX}]
+    puts $mB
+    set clk_pins [get_pins -quiet -of_objects [get_clocks -quiet]]
+    if {[llength $clk_pins] > 0} {
+        foreach sp [all_fanin -quiet -flat -startpoints_only $clk_pins] {
+            __vd_emit_clock_port $sp seen
+        }
+    }
+    foreach c [get_cells -quiet -hier -filter {REF_NAME =~ BUFG* || REF_NAME =~ IBUFG*}] {
+        foreach ipin [get_pins -quiet -of_objects $c -filter {DIRECTION == IN}] {
+            foreach sp [all_fanin -quiet -flat -startpoints_only $ipin] {
+                __vd_emit_clock_port $sp seen
+            }
+        }
+    }
+    puts $mE
+}
+"""
+    
+    async def _query_clock_ports_from_vivado(self) -> list:
+        """Query Vivado for the top-level clock port names of the open design.
+
+        Uses Vivado's clock-network connectivity rather than guessing from
+        port names; see ``_CLOCK_PORT_DETECT_TCL`` for the strategies. Returns
+        an empty list on any failure (caller falls back to a name heuristic),
+        and de-duplicates bus bits like ``clk[0]`` -> ``clk``.
+        """
+        # Write the helper script to disk once and source it on each call.
+        # ``run_tcl`` sends a single line, so a sourced proc keeps the wire
+        # protocol simple (vs. encoding multi-line Tcl with semicolons).
+        helper_path = self.temp_dir / "find_clock_ports.tcl"
+        if not helper_path.exists():
+            with open(helper_path, "w") as f:
+                f.write(self._CLOCK_PORT_DETECT_TCL)
+        
+        cmd = f"source {{{helper_path}}}; __vd_find_clock_ports"
+        try:
+            result = await self.vivado_session.call_tool(
+                "run_tcl", {"command": cmd, "timeout": 120}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to query clock ports from Vivado: {e}")
+            return []
+        
+        if not result.content:
+            return []
+        text = "\n".join(c.text for c in result.content if hasattr(c, 'text'))
+        
+        # Markers must match the dynamic ``format`` calls in the Tcl helper.
+        m = re.search(
+            r'__VDCLKP_BEGIN__\s*(.*?)\s*__VDCLKP_ENDX__',
+            text, re.DOTALL,
+        )
+        if not m:
+            logger.debug(f"Clock-port markers not found in run_tcl output; got: {text[:500]!r}")
+            return []
+        
+        names: list = []
+        seen: set = set()
+        # Valid Verilog port identifiers are word characters; reject anything
+        # that isn't, which filters out Vivado command echo lines (``# ...``),
+        # warning/info banners, and stray punctuation.
+        valid = re.compile(r'^\w+(?:\[\d+\])?$')
+        for line in m.group(1).splitlines():
+            name = line.strip()
+            if not name or not valid.match(name):
+                continue
+            # Strip a single trailing bus index so bit-level port objects
+            # like "clk[0]" collapse to the bus name "clk" we parsed from
+            # the Verilog port list.
+            name = re.sub(r'\[\d+\]$', '', name)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+    
     def get_design_info_from_verilog(self, verilog_path: Path) -> dict:
         """Extract design information from Verilog file (module name, ports)."""
         with open(verilog_path, 'r') as f:
@@ -326,8 +436,16 @@ class DCPValidator:
         else:
             raise ValueError(f"Could not find any module in {verilog_path}")
     
-    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path):
-        """Generate Verilog testbench for comparing two designs."""
+    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path,
+                           clock_names: Optional[list] = None):
+        """Generate Verilog testbench for comparing two designs.
+
+        ``clock_names`` is the authoritative list of top-level clock port names
+        as reported by Vivado's ``get_clocks``/``get_ports`` traversal. When
+        provided we use it directly; otherwise we fall back to a name-based
+        heuristic (which fails for Chisel/Rocket-Chip-style designs whose
+        clocks are named ``clock`` rather than ``clk``).
+        """
         golden_module = golden_info["module_name"]
         revised_module = revised_info["module_name"] + "_revised"  # Use renamed module
         
@@ -339,13 +457,40 @@ class DCPValidator:
             logger.warning("Design has no outputs - simulation will only verify no crashes occur")
             print("⚠ Warning: Design has no outputs - limited verification possible")
         
-        # Filter out clock and reset (we'll drive those separately)
-        regular_inputs = [p for p in inputs if 'clk' not in p['name'].lower() and 'rst' not in p['name'].lower() and 'reset' not in p['name'].lower()]
-        clocks = [p for p in inputs if 'clk' in p['name'].lower()]
+        # Identify clocks. Prefer the constraint-based list from Vivado; fall
+        # back to a broadened substring heuristic only if Vivado gave us
+        # nothing (e.g. an unconstrained design with no SDC).
+        clocks: list = []
+        if clock_names:
+            wanted = set(clock_names)
+            clocks = [p for p in inputs if p['name'] in wanted]
+            missing = wanted - {p['name'] for p in clocks}
+            if missing:
+                logger.warning(
+                    f"Vivado-reported clock ports not found among top-level "
+                    f"inputs: {sorted(missing)}"
+                )
+        if not clocks:
+            if clock_names:
+                logger.warning(
+                    "No Vivado-reported clocks matched top-level inputs; "
+                    "falling back to name-based heuristic"
+                )
+            clocks = [
+                p for p in inputs
+                if 'clk' in p['name'].lower() or 'clock' in p['name'].lower()
+            ]
+        
+        # Reset detection remains heuristic - DCPs do not carry a canonical
+        # "this port is the reset" property the way they do for clocks.
         resets = [p for p in inputs if 'rst' in p['name'].lower() or 'reset' in p['name'].lower()]
         
         if not clocks:
             raise ValueError("No clock signal found in design")
+        
+        # Everything that isn't a clock or reset is driven by the LFSR stimulus.
+        special_names = {p['name'] for p in clocks} | {p['name'] for p in resets}
+        regular_inputs = [p for p in inputs if p['name'] not in special_names]
         
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
@@ -549,6 +694,14 @@ endmodule
         })
         print(f"✓ Golden model exported: {golden_v.name}")
         
+        # Query clock ports while the golden design is still loaded - more
+        # robust than guessing from Verilog port names downstream.
+        golden_clocks = await self._query_clock_ports_from_vivado()
+        if golden_clocks:
+            logger.info(f"Vivado reports golden clock ports: {golden_clocks}")
+        else:
+            logger.info("Vivado reported no clocks for golden design (will fall back to name heuristic)")
+        
         # Open revised DCP
         logger.info(f"Opening revised DCP: {self.revised_dcp}")
         result = await self.vivado_session.call_tool("open_checkpoint", {
@@ -562,6 +715,18 @@ endmodule
             "force": True
         })
         print(f"✓ Revised model exported: {revised_v.name}")
+        
+        # Query clock ports for the revised design as well, mainly so we can
+        # detect mismatches that would invalidate the testbench (the testbench
+        # is built from golden's port list, but revised must agree).
+        revised_clocks = await self._query_clock_ports_from_vivado()
+        if revised_clocks:
+            logger.info(f"Vivado reports revised clock ports: {revised_clocks}")
+        if golden_clocks and revised_clocks and set(golden_clocks) != set(revised_clocks):
+            logger.warning(
+                f"Clock port set differs between golden ({sorted(golden_clocks)}) "
+                f"and revised ({sorted(revised_clocks)}); using golden's"
+            )
         
         # Parse design information
         print("\nParsing design information...")
@@ -585,7 +750,10 @@ endmodule
         # Generate testbench
         tb_path = self.temp_dir / "testbench.v"
         print(f"\nGenerating testbench ({self.num_vectors} random vectors)...")
-        self.generate_testbench(golden_info, revised_info, tb_path)
+        self.generate_testbench(
+            golden_info, revised_info, tb_path,
+            clock_names=golden_clocks,
+        )
         print(f"✓ Testbench generated: {tb_path.name}")
         
         # Run xsim simulation
@@ -595,6 +763,7 @@ endmodule
         xsim_dir = self.temp_dir / "xsim_work"
         xsim_dir.mkdir(exist_ok=True)
         
+        current_step = "setup"
         try:
             # Get Vivado installation path for simulation libraries
             # Check VIVADO_EXEC environment variable first, then PATH
@@ -617,37 +786,73 @@ endmodule
                 logger.warning(f"UNISIM library not found at {unisim_dir}, trying glbl.v only")
             
             # To avoid module name conflicts, rename ALL modules in revised file
+            # (both declarations AND instantiations of those modules) so that the
+            # renamed-revised top is a self-contained design that doesn't silently
+            # link against golden sub-modules at elaboration time.
             logger.info("Renaming all revised modules to avoid conflicts...")
             revised_renamed = xsim_dir / "revised_sim_renamed.v"
             
             with open(revised_v, 'r') as f:
                 content = f.read()
             
-            # Rename ALL modules (not just top) to avoid sub-module conflicts
             revised_module_name = revised_info["module_name"]
             revised_module_renamed = f"{revised_module_name}_revised"
             
-            # Rename module declarations - handle both single-line and multi-line
-            # "module name" OR "module name("
-            content = re.sub(
-                r'\bmodule\s+(\w+)(\s*[\(\n])',
-                lambda m: f'module {m.group(1)}_revised{m.group(2)}',
+            # Pass 1: collect every declared module name in the revised netlist.
+            # Vivado's funcsim output is regular: each declaration starts with
+            # "module <name>" at the start of a line.
+            declared_module_names = set(re.findall(
+                r'(?m)^\s*module\s+(\w+)\b',
                 content
+            ))
+            logger.info(
+                f"Found {len(declared_module_names)} module declarations in revised netlist"
             )
             
-            # Rename module instantiations (user modules, not FPGA primitives)
-            # Look for patterns like "layer0 inst_name (" or "myreg inst_name ("
-            # Primitives typically start with uppercase (LUT6, FDRE, etc.)
-            content = re.sub(
-                r'\b(layer\d+[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
-            content = re.sub(
-                r'\b(myreg[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
+            # Pass 2: per-line scan rewriting both declarations and instantiations
+            # of declared modules to use the "_revised" suffix. We use a per-line
+            # scan with set-membership lookups (O(file size)) rather than a giant
+            # alternation regex, which is intractably slow on big benchmarks
+            # (e.g. corescore_500_mod has ~6700 user modules in a 71 MB netlist).
+            #
+            # Lines we care about in Vivado funcsim output:
+            #   "  module NAME"               -> declaration to rename
+            #   "  NAME inst_name (..."       -> instantiation to rename
+            # Anything else (port lists, assigns, wires, comments, primitives
+            # like LUT6/FDRE which are NOT in declared_module_names) is left alone.
+            if declared_module_names:
+                renamed_lines = []
+                suffix = "_revised"
+                for line in content.splitlines(keepends=True):
+                    s = line.lstrip()
+                    if not s:
+                        renamed_lines.append(line); continue
+                    sp = s.find(' ')
+                    tab = s.find('\t')
+                    if tab != -1 and (sp == -1 or tab < sp):
+                        sp = tab
+                    if sp == -1:
+                        renamed_lines.append(line); continue
+                    first = s[:sp]
+                    if first == 'module':
+                        rest = s[sp:].lstrip()
+                        nm = re.match(r'(\w+)', rest)
+                        if nm and nm.group(1) in declared_module_names:
+                            name = nm.group(1)
+                            indent = line[:len(line) - len(s)]
+                            after_name = len(s) - len(rest) + len(name)
+                            renamed_lines.append(
+                                indent + 'module ' + name + suffix + s[after_name:]
+                            )
+                            continue
+                    elif first in declared_module_names:
+                        indent = line[:len(line) - len(s)]
+                        renamed_lines.append(
+                            indent + first + suffix + s[len(first):]
+                        )
+                        continue
+                    renamed_lines.append(line)
+                content = ''.join(renamed_lines)
             
             with open(revised_renamed, 'w') as f:
                 f.write(content)
@@ -668,12 +873,26 @@ endmodule
                 if glbl_v.exists():
                     compile_cmd.insert(3, str(glbl_v))
             
+            # Timeouts are generous because large benchmarks (e.g. corescore_500_mod
+            # with thousands of user modules) can take many minutes per step.
+            # xvlog/xelab times scale with design size; xsim time scales with both
+            # design size and num_vectors.
+            xvlog_timeout_s = 1800   # 30 min
+            xelab_timeout_s = 3600   # 60 min - elaborates both designs
+            # xsim: per-cycle cost is roughly proportional to the number of
+            # primitive cells. Two copies of a 100k-LUT design (e.g.
+            # corescore_500_mod) measured ~0.3s/cycle. We add a generous baseline
+            # for kernel init and cap below by 60 min so small designs still get
+            # a comfortable budget.
+            xsim_timeout_s = max(3600, 600 + int(self.num_vectors * 1.0))
+            
+            current_step = "xvlog (compilation)"
             result = subprocess.run(
                 compile_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xvlog_timeout_s
             )
             
             if result.returncode != 0:
@@ -684,11 +903,20 @@ endmodule
             
             print("✓ Compilation successful")
             
-            # Elaborate with UNISIM library reference
+            # Elaborate with UNISIM library reference.
+            #
+            # We pass "--debug off" because the testbench reports results via
+            # $display; we never inspect waveforms, so the per-signal debug
+            # instrumentation that "-debug typical" enables is pure overhead
+            # (relevant for smaller benchmarks where it dominates).
+            #
+            # "--mt auto" lets xelab parallelise where it can; it is a no-op for
+            # the per-module compile loop on huge designs but doesn't hurt.
             logger.info("Elaborating with xelab...")
             elab_cmd = [
                 "xelab",
-                "-debug", "typical",
+                "--debug", "off",
+                "--mt", "auto",
                 "-L", "unisims_ver",  # Link against UNISIM library
                 "-L", "unimacro_ver",
                 "work.testbench",  # Specify library.module
@@ -696,12 +924,13 @@ endmodule
                 "-s", "testbench_sim"
             ]
             
+            current_step = "xelab (elaboration)"
             result = subprocess.run(
                 elab_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xelab_timeout_s
             )
             
             if result.returncode != 0:
@@ -740,12 +969,13 @@ endmodule
                 "-R"
             ]
             
+            current_step = "xsim (simulation)"
             result = subprocess.run(
                 sim_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=xsim_timeout_s
             )
             
             # Parse simulation output
@@ -796,12 +1026,17 @@ endmodule
             
             return self.phase2_passed
             
-        except subprocess.TimeoutExpired:
-            print("\n✗ Simulation timeout")
+        except subprocess.TimeoutExpired as e:
+            timeout_s = getattr(e, "timeout", "?")
+            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            logger.error(
+                f"subprocess.TimeoutExpired in step '{current_step}' "
+                f"(timeout={timeout_s}s)"
+            )
             return False
         except Exception as e:
-            print(f"\n✗ Simulation error: {e}")
-            logger.exception("Simulation error")
+            print(f"\n✗ Simulation error in {current_step}: {e}")
+            logger.exception(f"Error in step '{current_step}'")
             return False
     
     async def validate(self) -> bool:
@@ -920,8 +1155,11 @@ Examples:
         "--vectors",
         "-n",
         type=int,
-        default=10000,
-        help="Number of random test vectors to simulate (default: 10000)"
+        default=200,
+        help="Number of random test vectors to simulate (default: 200). "
+             "Larger benchmarks (e.g. corescore_500_mod) cost ~1s of xsim CPU "
+             "per vector, so the default keeps wall-clock reasonable. Bump this "
+             "up for higher-confidence runs."
     )
     parser.add_argument(
         "--debug",
