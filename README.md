@@ -291,7 +291,7 @@ After running `dcp_optimizer.py`, you should validate that the optimized design 
 
 **Phase 2: Functional Simulation** (via Vivado + xsim)
 - Exports both designs as Verilog simulation models
-- Generates testbench with random stimulus (LFSR-based)
+- Generates a testbench with LFSR-based stimulus and reactive drivers for recognized ready/valid, command/response, streaming, and HLS control interfaces
 - Runs xsim simulation with configurable test vector count
 - Compares outputs cycle-by-cycle for mismatches
 
@@ -306,6 +306,9 @@ python3 validate_dcps.py golden.dcp optimized.dcp --vectors 10000
 
 # Enable debug logging
 python3 validate_dcps.py golden.dcp optimized.dcp --debug
+
+# Disable reactive interface stimulus and use pure LFSR randomness
+python3 validate_dcps.py golden.dcp optimized.dcp --no-reactive
 ```
 
 ### Example
@@ -369,7 +372,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 # Simulation Results:
 #   Cycles: 200
 #   Mismatches: 0
-#   Log: /tmp/dcp_validation_xyz/simulation.log
+#   Log: dcp_validation_xyz/simulation.log
 #
 # Phase 2: PASSED ✓
 # ----------------------------------------------------------------------
@@ -400,18 +403,21 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 | `revised_dcp` | Revised (optimized) DCP file to validate | Required |
 | `--vectors`, `-n` | Number of random test vectors to simulate | 200 |
 | `--debug` | Enable debug logging | False |
+| `--no-reactive` | Disable reactive interface stimulus and use pure LFSR randomness | False |
 
 ### Notes
 
 - **Simulation time**: Dominated by `xelab` (must compile every cell in both designs) plus per-cycle `xsim` cost. For huge benchmarks like `corescore_500_mod` (~6.7K user modules, ~100K primitives) `xelab` alone takes ~14 minutes, so run-to-run wall-clock is bounded by that even with very few vectors.
 - **Vector count**: 200 vectors is sufficient to catch functional regressions on most designs while keeping wall-clock reasonable on the largest benchmarks. For higher confidence on small/medium designs use `--vectors 10000` (or more). xsim cost scales roughly linearly with vectors.
-- **Working directory**: Preserved after validation in `/tmp/dcp_validation_*` with simulation logs and intermediate files.
+- **Working directory**: Preserved after validation in a repo-local `dcp_validation_*` directory with simulation logs and intermediate files.
 - **No testbench required**: The tool automatically generates stimulus based on design I/O structure.
+- **Reactive stimulus**: By default, the generated testbench recognizes common interface naming patterns and drives simple reactive behavior. Use `--no-reactive` to fall back to pure LFSR stimulus if those heuristics are not appropriate for a design.
 - **Clock/reset detection**: Automatically identifies clock and reset signals by name pattern matching.
 
 ### Limitations
 
 - Simulation-based validation is not exhaustive (depends on test vector coverage)
+- Simulator crashes, timeouts, or tool failures are treated as validation failures, even if no output mismatches were observed before the failure.
 - For formal proof of equivalence, use commercial tools like Synopsys Formality or Cadence Conformal
 - Designs with encrypted IP blocks are not supported
 - Asynchronous designs may require custom testbenches
