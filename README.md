@@ -411,7 +411,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 - **Vector count**: 200 vectors is sufficient to catch functional regressions on most designs while keeping wall-clock reasonable on the largest benchmarks. For higher confidence on small/medium designs use `--vectors 10000` (or more). xsim cost scales roughly linearly with vectors.
 - **Working directory**: Preserved after validation in a repo-local `dcp_validation_*` directory with simulation logs and intermediate files.
 - **No testbench required**: The tool automatically generates stimulus based on design I/O structure.
-- **Reactive stimulus**: By default, the generated testbench recognizes common interface naming patterns and drives simple reactive behavior. Use `--no-reactive` to fall back to pure LFSR stimulus if those heuristics are not appropriate for a design.
+- **Reactive stimulus**: By default, the generated testbench recognizes common interface naming patterns and drives simple reactive behavior. This is a heuristic, golden-driven shared environment: the testbench uses the golden DUT's recognized control outputs to schedule shared inputs, and separately checks corresponding control outputs for divergence. Use `--no-reactive` to fall back to pure LFSR stimulus if those heuristics are not appropriate for a design or benchmark.
 - **Clock/reset detection**: Automatically identifies clock and reset signals by name pattern matching.
 
 ### Limitations

@@ -39,6 +39,112 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def sanitize_identifier(name: str) -> str:
+    """Convert an arbitrary interface prefix into a valid Verilog identifier."""
+    ident = re.sub(r'[^0-9A-Za-z_]', '_', name)
+    ident = re.sub(r'_+', '_', ident).strip('_')
+    if not ident:
+        ident = "ifc"
+    if ident[0].isdigit():
+        ident = f"ifc_{ident}"
+    return ident
+
+
+def port_bit_width(port: dict) -> int:
+    """Return the bit width for a parsed Verilog port dictionary."""
+    width = port.get('width')
+    if not width:
+        return 1
+    match = re.match(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', width)
+    if not match:
+        return 1
+    return abs(int(match.group(1)) - int(match.group(2))) + 1
+
+
+def assign_from_seed(port: dict, seed_expr: str, indent: str = "            ") -> str:
+    """Generate a Verilog assignment using chunk-varying seed data."""
+    bits = port_bit_width(port)
+    name = port['name']
+    # Rely on Verilog assignment truncation/extension for <=32-bit ports.
+    # Indexing a parenthesized expression like "(a ^ b)[7:0]" is rejected by
+    # xvlog in the Verilog mode used here.
+    if bits <= 32:
+        return f"{indent}{name} = {seed_expr};"
+    chunks = (bits + 31) // 32
+    chunk_exprs = []
+    for idx in range(chunks):
+        mask = (0x9E3779B9 * (idx + 1)) & 0xFFFFFFFF
+        chunk_exprs.append(f"({seed_expr} ^ 32'h{mask:08X})")
+    return f"{indent}{name} = {{{', '.join(reversed(chunk_exprs))}}};"
+
+
+def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: int) -> dict:
+    """Parse xsim output and compute the validator pass/fail fields."""
+    mismatch_count = 0
+    protocol_mismatch_count = 0
+    cycles_simulated = 0
+    result_pass_seen = False
+    result_fail_seen = False
+    simulator_failed = False
+
+    fatal_patterns = [
+        r'Simulation engine not responding',
+        r'Simulator command interrupted',
+        r'Command failed:',
+        r'terminated in an unexpected manner',
+        r'\bFATAL\b',
+        r'\bUSF-XSim\b',
+        r'\bXSIM\s+\d+-\d+\b',
+    ]
+    fatal_re = re.compile('|'.join(fatal_patterns), re.IGNORECASE)
+
+    for line in sim_output.split('\n'):
+        if 'PROTOCOL MISMATCH' in line:
+            protocol_mismatch_count += 1
+        elif 'MISMATCH' in line:
+            mismatch_count += 1
+        elif 'Cycles simulated:' in line:
+            match = re.search(r'Cycles simulated:\s*(\d+)', line)
+            if match:
+                cycles_simulated = int(match.group(1))
+        elif 'Mismatches found:' in line:
+            match = re.search(r'Mismatches found:\s*(\d+)', line)
+            if match:
+                mismatch_count = int(match.group(1))
+        elif 'Protocol mismatches found:' in line:
+            match = re.search(r'Protocol mismatches found:\s*(\d+)', line)
+            if match:
+                protocol_mismatch_count = int(match.group(1))
+        elif 'Result: PASS' in line:
+            result_pass_seen = True
+        elif 'Result: FAIL' in line:
+            result_fail_seen = True
+
+        if fatal_re.search(line):
+            simulator_failed = True
+
+    passed = (
+        returncode == 0
+        and result_pass_seen
+        and not result_fail_seen
+        and not simulator_failed
+        and cycles_simulated == expected_cycles
+        and mismatch_count == 0
+        and protocol_mismatch_count == 0
+    )
+
+    return {
+        "cycles_simulated": cycles_simulated,
+        "mismatch_count": mismatch_count,
+        "protocol_mismatch_count": protocol_mismatch_count,
+        "result_pass_seen": result_pass_seen,
+        "result_fail_seen": result_fail_seen,
+        "simulator_failed": simulator_failed,
+        "returncode": returncode,
+        "passed": passed,
+    }
+
+
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
@@ -499,40 +605,20 @@ proc __vd_find_clock_ports {} {
         input_by_name = {p['name']: p for p in regular_inputs}
         output_by_name = {p['name']: p for p in outputs}
 
-        def sanitize_identifier(name: str) -> str:
-            ident = re.sub(r'[^0-9A-Za-z_]', '_', name)
-            ident = re.sub(r'_+', '_', ident).strip('_')
-            if not ident:
-                ident = "ifc"
-            if ident[0].isdigit():
-                ident = f"ifc_{ident}"
-            return ident
-
-        def port_bit_width(port: dict) -> int:
-            width = port.get('width')
-            if not width:
-                return 1
-            match = re.match(r'\[(\d+):(\d+)\]', width)
-            if not match:
-                return 1
-            return int(match.group(1)) - int(match.group(2)) + 1
-
-        def assign_from_seed(port: dict, seed_expr: str, indent: str = "            ") -> str:
-            bits = port_bit_width(port)
-            name = port['name']
-            # Rely on Verilog assignment truncation/extension for <=32-bit
-            # ports. Indexing a parenthesized expression like "(a ^ b)[7:0]"
-            # is rejected by xvlog in the Verilog mode used here.
-            if bits <= 32:
-                return f"{indent}{name} = {seed_expr};"
-            chunks = (bits + 31) // 32
-            return f"{indent}{name} = {{{chunks}{{{seed_expr}}}}};"
-
         controlled_inputs = set()
         response_ifaces = []
         request_ifaces = []
         ready_bias_inputs = []
         hls_iface = None
+        used_iface_ids = {}
+
+        def unique_iface_id(prefix: str) -> str:
+            base = sanitize_identifier(prefix)
+            count = used_iface_ids.get(base, 0)
+            used_iface_ids[base] = count + 1
+            if count == 0:
+                return base
+            return f"{base}_{count}"
 
         # Detect simple master-side request/response interfaces where the DUT
         # emits commands and expects a response on top-level inputs. The
@@ -577,7 +663,7 @@ proc __vd_find_clock_ports {} {
                 key=lambda p: p['name'],
             )
 
-            iface_id = sanitize_identifier(prefix)
+            iface_id = unique_iface_id(prefix)
             response_ifaces.append({
                 "id": iface_id,
                 "prefix": prefix,
@@ -632,7 +718,7 @@ proc __vd_find_clock_ports {} {
             if not valid_in or not ready_out:
                 continue
 
-            iface_id = sanitize_identifier(prefix)
+            iface_id = unique_iface_id(prefix)
             request_ifaces.append({
                 "id": iface_id,
                 "prefix": prefix,
@@ -678,7 +764,7 @@ proc __vd_find_clock_ports {} {
                     if p['name'] not in controlled_inputs and p['name'] != ap_start_in['name']
                 ]
                 hls_iface = {
-                    "id": "hls_ap_ctrl",
+                    "id": unique_iface_id("hls_ap_ctrl"),
                     "start_in": ap_start_in['name'],
                     "done_out": ap_done_out,
                     "idle_out": ap_idle_out,
@@ -729,8 +815,7 @@ proc __vd_find_clock_ports {} {
                 elif bits <= 32:
                     stim_lines.append(f"            {name} = lfsr[{bits-1}:0];")
                 else:
-                    chunks = (bits + 31) // 32
-                    stim_lines.append(f"            {name} = {{{chunks}{{lfsr}}}};")
+                    stim_lines.append(assign_from_seed(port, "lfsr"))
             return '\n'.join(stim_lines) if stim_lines else '            // No fallback-random inputs'
 
         def generate_env_declarations() -> str:
@@ -884,6 +969,33 @@ proc __vd_find_clock_ports {} {
                 lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'hA5A55A5A;")
                 lines.append("            end")
             return '\n'.join(lines) if lines else '            // No reactive bookkeeping required'
+
+        def generate_protocol_compare_code() -> str:
+            protocol_outputs = []
+            seen_protocol_outputs = set()
+
+            def add_protocol_output(name: Optional[str]):
+                if name and name in output_by_name and name not in seen_protocol_outputs:
+                    seen_protocol_outputs.add(name)
+                    protocol_outputs.append(name)
+
+            for iface in response_ifaces:
+                add_protocol_output(iface['cmd_valid_out'])
+            for iface in request_ifaces:
+                add_protocol_output(iface['ready_out'])
+            if hls_iface:
+                add_protocol_output(hls_iface['done_out'])
+                add_protocol_output(hls_iface['idle_out'])
+                add_protocol_output(hls_iface['ready_out'])
+
+            lines = []
+            for name in protocol_outputs:
+                lines.append(f'''
+            if (golden_{name} !== revised_{name}) begin
+                $display("PROTOCOL MISMATCH at cycle %0d: {name} golden=%h revised=%h", cycle_count, golden_{name}, revised_{name});
+                protocol_mismatch_count = protocol_mismatch_count + 1;
+            end''')
+            return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
         
         # Generate testbench
         compare_body = chr(10).join(f'''
@@ -940,10 +1052,12 @@ module testbench;
     
     // Test stimulus and checking
     integer mismatch_count;
+    integer protocol_mismatch_count;
     integer cycle_count;
     
     initial begin
         mismatch_count = 0;
+        protocol_mismatch_count = 0;
         cycle_count = 0;
 {generate_env_init_code()}
         
@@ -962,6 +1076,8 @@ module testbench;
 {generate_negedge_stimulus_code()}
             @(posedge {clock});
 {generate_posedge_bookkeeping_code()}
+            #1;
+{generate_protocol_compare_code()}
         end
         
         // Run test vectors with output checking
@@ -981,6 +1097,9 @@ module testbench;
             
             // Compare all outputs
 {compare_body}
+
+            // Compare protocol outputs that drive the reactive environment
+{generate_protocol_compare_code()}
         end
         
         // Report results
@@ -989,7 +1108,8 @@ module testbench;
         $display("=======================================");
         $display("Cycles simulated: %0d", cycle_count);
         {'$display("Outputs compared: 0 (design has no outputs)");' if not outputs else '$display("Mismatches found: %0d", mismatch_count);'}
-        if (mismatch_count == 0) begin
+        $display("Protocol mismatches found: %0d", protocol_mismatch_count);
+        if (mismatch_count == 0 && protocol_mismatch_count == 0) begin
             {'$display("Result: PASS (no crashes detected)");' if not outputs else '$display("Result: PASS");'}
             $finish(0);
         end else begin
@@ -1329,67 +1449,41 @@ endmodule
             with open(log_file, 'w') as f:
                 f.write(sim_output)
             
-            # Extract results
-            mismatch_count = 0
-            cycles_simulated = 0
-            result_pass_seen = False
-            result_fail_seen = False
-            simulator_failed = False
-            
+            parse_result = parse_simulation_output(
+                sim_output,
+                result.returncode,
+                self.num_vectors,
+            )
+
             for line in sim_output.split('\n'):
                 if 'MISMATCH' in line:
-                    mismatch_count += 1
                     print(f"  {line}")
-                elif 'Cycles simulated:' in line:
-                    match = re.search(r'Cycles simulated:\s*(\d+)', line)
-                    if match:
-                        cycles_simulated = int(match.group(1))
-                elif 'Mismatches found:' in line:
-                    match = re.search(r'Mismatches found:\s*(\d+)', line)
-                    if match:
-                        mismatch_count = int(match.group(1))
-                elif 'Result: PASS' in line:
-                    result_pass_seen = True
-                elif 'Result: FAIL' in line:
-                    result_fail_seen = True
-                elif (
-                    'Simulation engine not responding' in line
-                    or 'Simulator command interrupted' in line
-                    or 'Command failed:' in line
-                    or 'terminated in an unexpected manner' in line
-                ):
-                    simulator_failed = True
-            
+
             self.simulation_report = {
-                "cycles_simulated": cycles_simulated,
-                "mismatch_count": mismatch_count,
+                "cycles_simulated": parse_result["cycles_simulated"],
+                "mismatch_count": parse_result["mismatch_count"],
+                "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
                 "log_file": str(log_file),
-                "result_pass_seen": result_pass_seen,
-                "result_fail_seen": result_fail_seen,
-                "simulator_failed": simulator_failed,
-                "returncode": result.returncode
+                "result_pass_seen": parse_result["result_pass_seen"],
+                "result_fail_seen": parse_result["result_fail_seen"],
+                "simulator_failed": parse_result["simulator_failed"],
+                "returncode": parse_result["returncode"],
             }
             
             # Check if passed. xsim can report an internal simulator failure
             # while still returning 0, so require the testbench's explicit
             # completion marker and expected cycle count.
-            self.phase2_passed = (
-                result.returncode == 0
-                and result_pass_seen
-                and not result_fail_seen
-                and not simulator_failed
-                and cycles_simulated == self.num_vectors
-                and mismatch_count == 0
-            )
+            self.phase2_passed = parse_result["passed"]
             
             print("\n" + "-"*70)
             print(f"Simulation Results:")
-            print(f"  Cycles: {cycles_simulated}")
-            print(f"  Mismatches: {mismatch_count}")
+            print(f"  Cycles: {parse_result['cycles_simulated']}")
+            print(f"  Mismatches: {parse_result['mismatch_count']}")
+            print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
             print(f"  Log: {log_file}")
-            if simulator_failed:
+            if parse_result["simulator_failed"]:
                 print("  Simulator reported an internal failure")
-            if not result_pass_seen and result.returncode == 0:
+            if not parse_result["result_pass_seen"] and result.returncode == 0:
                 print("  Testbench PASS marker not found")
             
             if self.phase2_passed:
@@ -1478,6 +1572,7 @@ endmodule
             if self.simulation_report:
                 print(f"  Cycles: {self.simulation_report.get('cycles_simulated', 0)}")
                 print(f"  Mismatches: {self.simulation_report.get('mismatch_count', 0)}")
+                print(f"  Protocol mismatches: {self.simulation_report.get('protocol_mismatch_count', 0)}")
         
         print()
         if self.phase2_skipped:
