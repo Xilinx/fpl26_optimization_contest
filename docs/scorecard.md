@@ -24,8 +24,6 @@ These fields describe the validation run as a whole and are emitted once per sco
 | `validation_id` | Unique ID for this validation attempt. |
 | `round` | Contest round being validated, for example `alpha`. |
 | `validator_git_sha` | Git commit of the trusted official validation tools bundle used for functional validation. |
-| `validator_s3_key` | Internal S3 location of the trusted validation tools bundle used for this run. |
-| `validator_validate_dcps_sha256` | SHA256 checksum of the trusted `validate_dcps.py` script used for functional validation. |
 | `total_score` | Sum of all benchmark scores. Failed benchmarks contribute `0`. |
 | `failure_reason` | Run-level failure reason if validation failed before completing benchmark evaluation. Usually `null` for completed runs. |
 | `status` | Overall validation status, such as `completed` or `failed`. |
@@ -41,7 +39,8 @@ Each entry in the `benchmarks` array describes the result for one benchmark.
 | Field | Description |
 |---|---|
 | `name` | Benchmark name. |
-| `checksum_sha256` | SHA256 checksum of the input benchmark DCP used for validation. |
+| `benchmark_sha256` | Composite SHA256 checksum of the benchmark manifest. |
+| `input_dcp_sha256` | SHA256 of the benchmark `input.dcp` file, equivalent to running `sha256sum input.dcp`. |
 | `status` | Benchmark outcome. `scored` means the benchmark completed validation and was scored; `failed` means a required step failed. |
 | `produced_output_dcp` | `true` if the validation harness found an output DCP for this benchmark. |
 | `failure_reason` | Benchmark-level failure reason if the benchmark did not receive a positive score. May also be `no_improvement` when validation passed but Fmax did not improve. |
@@ -71,7 +70,6 @@ Each entry in the `benchmarks` array describes the result for one benchmark.
 | `validation` | Object containing detailed pass/fail checks for routing, DRC, timing, and functional validation. See [Validation Check Fields](#validation-check-fields). |
 | `wall_time_seconds` | Actual wall-clock runtime of `make run_optimizer`, in seconds. |
 | `gamma_capped` | `true` if runtime reached the per-benchmark cap and the runtime penalty was saturated. |
-| `openrouter_key_hash` | Internal hash identifier for the temporary OpenRouter key used for this benchmark. |
 | `openrouter_metering_failed` | `true` if OpenRouter usage could not be measured reliably. |
 
 ---
