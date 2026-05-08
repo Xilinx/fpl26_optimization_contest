@@ -53,8 +53,10 @@ and is included in the suite for the remainder of the contest.
 ## Baseline Agent Results
 
 The following table shows the Fmax improvement achieved by the optimization agent
-(`dcp_optimizer.py`) on each benchmark design. All timing is measured on the
-`clk_fpl26contest` clock domain. Each design was given a maximum runtime of 1 hour.
+(`dcp_optimizer.py`) on the 12 benchmarks that were public during the alpha
+submission round. The hidden alpha benchmark `vexriscv_re-place_v2` is not
+covered in this table. All timing is measured on the `clk_fpl26contest` clock
+domain. Each design was given a maximum runtime of 1 hour.
 
 | Benchmark | Initial Fmax (MHz) | Best Fmax (MHz) | Improvement (MHz) | Improvement (%) | WNS Change (ns) | Runtime | Status |
 |---|---:|---:|---:|---:|---|---:|---|
