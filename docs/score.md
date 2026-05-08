@@ -35,3 +35,7 @@ Since testing and validation will occur on AWS instances, we will limit runtime 
 
 ## OpenRouter Cost Limit
 For each team's submission, a new API key provisioned with at least $1.00 USD per benchmark will be allocated for the entire evaluation.  Teams cannot provide their own API keys to enable additional spend beyond this limit.  
+
+## Scorecard
+After each evaluation run, teams receive a detailed scorecard with all of the per-run and per-benchmark fields used to compute their score. See the [Scorecard Reference](scorecard.html) for a full description of every field reported.
+
