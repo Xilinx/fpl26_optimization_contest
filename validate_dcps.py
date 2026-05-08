@@ -39,14 +39,121 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def sanitize_identifier(name: str) -> str:
+    """Convert an arbitrary interface prefix into a valid Verilog identifier."""
+    ident = re.sub(r'[^0-9A-Za-z_]', '_', name)
+    ident = re.sub(r'_+', '_', ident).strip('_')
+    if not ident:
+        ident = "ifc"
+    if ident[0].isdigit():
+        ident = f"ifc_{ident}"
+    return ident
+
+
+def port_bit_width(port: dict) -> int:
+    """Return the bit width for a parsed Verilog port dictionary."""
+    width = port.get('width')
+    if not width:
+        return 1
+    match = re.match(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', width)
+    if not match:
+        return 1
+    return abs(int(match.group(1)) - int(match.group(2))) + 1
+
+
+def assign_from_seed(port: dict, seed_expr: str, indent: str = "            ") -> str:
+    """Generate a Verilog assignment using chunk-varying seed data."""
+    bits = port_bit_width(port)
+    name = port['name']
+    # Rely on Verilog assignment truncation/extension for <=32-bit ports.
+    # Indexing a parenthesized expression like "(a ^ b)[7:0]" is rejected by
+    # xvlog in the Verilog mode used here.
+    if bits <= 32:
+        return f"{indent}{name} = {seed_expr};"
+    chunks = (bits + 31) // 32
+    chunk_exprs = []
+    for idx in range(chunks):
+        mask = (0x9E3779B9 * (idx + 1)) & 0xFFFFFFFF
+        chunk_exprs.append(f"({seed_expr} ^ 32'h{mask:08X})")
+    return f"{indent}{name} = {{{', '.join(reversed(chunk_exprs))}}};"
+
+
+def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: int) -> dict:
+    """Parse xsim output and compute the validator pass/fail fields."""
+    mismatch_count = 0
+    protocol_mismatch_count = 0
+    cycles_simulated = 0
+    result_pass_seen = False
+    result_fail_seen = False
+    simulator_failed = False
+
+    fatal_patterns = [
+        r'Simulation engine not responding',
+        r'Simulator command interrupted',
+        r'Command failed:',
+        r'terminated in an unexpected manner',
+        r'\bFATAL\b',
+        r'\bUSF-XSim\b',
+        r'\bXSIM\s+\d+-\d+\b',
+    ]
+    fatal_re = re.compile('|'.join(fatal_patterns), re.IGNORECASE)
+
+    for line in sim_output.split('\n'):
+        if 'PROTOCOL MISMATCH' in line:
+            protocol_mismatch_count += 1
+        elif 'MISMATCH' in line:
+            mismatch_count += 1
+        elif 'Cycles simulated:' in line:
+            match = re.search(r'Cycles simulated:\s*(\d+)', line)
+            if match:
+                cycles_simulated = int(match.group(1))
+        elif 'Mismatches found:' in line:
+            match = re.search(r'Mismatches found:\s*(\d+)', line)
+            if match:
+                mismatch_count = int(match.group(1))
+        elif 'Protocol mismatches found:' in line:
+            match = re.search(r'Protocol mismatches found:\s*(\d+)', line)
+            if match:
+                protocol_mismatch_count = int(match.group(1))
+        elif 'Result: PASS' in line:
+            result_pass_seen = True
+        elif 'Result: FAIL' in line:
+            result_fail_seen = True
+
+        if fatal_re.search(line):
+            simulator_failed = True
+
+    passed = (
+        returncode == 0
+        and result_pass_seen
+        and not result_fail_seen
+        and not simulator_failed
+        and cycles_simulated == expected_cycles
+        and mismatch_count == 0
+        and protocol_mismatch_count == 0
+    )
+
+    return {
+        "cycles_simulated": cycles_simulated,
+        "mismatch_count": mismatch_count,
+        "protocol_mismatch_count": protocol_mismatch_count,
+        "result_pass_seen": result_pass_seen,
+        "result_fail_seen": result_fail_seen,
+        "simulator_failed": simulator_failed,
+        "returncode": returncode,
+        "passed": passed,
+    }
+
+
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False, no_reactive: bool = False):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
         self.debug = debug
+        self.no_reactive = no_reactive
         
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
@@ -494,7 +601,188 @@ proc __vd_find_clock_ports {} {
         
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
-        
+
+        input_by_name = {p['name']: p for p in regular_inputs}
+        output_by_name = {p['name']: p for p in outputs}
+
+        controlled_inputs = set()
+        response_ifaces = []
+        request_ifaces = []
+        ready_bias_inputs = []
+        hls_iface = None
+        used_iface_ids = {}
+
+        def unique_iface_id(prefix: str) -> str:
+            base = sanitize_identifier(prefix)
+            count = used_iface_ids.get(base, 0)
+            used_iface_ids[base] = count + 1
+            if count == 0:
+                return base
+            return f"{base}_{count}"
+
+        # Detect simple master-side request/response interfaces where the DUT
+        # emits commands and expects a response on top-level inputs. The
+        # validator will emulate a one-deep reactive responder using golden DUT
+        # outputs as the reference handshake source.
+        for port in regular_inputs:
+            name = port['name']
+            if not name.endswith('_rsp_valid'):
+                continue
+            prefix = name[:-len('_rsp_valid')]
+            cmd_valid_out = next(
+                (
+                    candidate for candidate in (
+                        f"{prefix}_cmd_valid",
+                        f"{prefix}_valid",
+                        f"{prefix}_tvalid",
+                    )
+                    if candidate in output_by_name
+                ),
+                None,
+            )
+            if not cmd_valid_out:
+                continue
+
+            ready_in = next(
+                (
+                    candidate for candidate in (
+                        f"{prefix}_cmd_ready",
+                        f"{prefix}_ready",
+                        f"{prefix}_tready",
+                    )
+                    if candidate in input_by_name
+                ),
+                None,
+            )
+
+            payload_inputs = sorted(
+                (
+                    p for p in regular_inputs
+                    if p['name'].startswith(f"{prefix}_rsp_payload_")
+                ),
+                key=lambda p: p['name'],
+            )
+
+            iface_id = unique_iface_id(prefix)
+            response_ifaces.append({
+                "id": iface_id,
+                "prefix": prefix,
+                "cmd_valid_out": cmd_valid_out,
+                "ready_in": ready_in,
+                "rsp_valid_in": name,
+                "payload_inputs": payload_inputs,
+            })
+            controlled_inputs.add(name)
+            if ready_in:
+                controlled_inputs.add(ready_in)
+            for payload in payload_inputs:
+                controlled_inputs.add(payload['name'])
+
+        # Detect simple sink-style request/streaming interfaces where the DUT
+        # exposes a ready output and expects the testbench to drive valid/data.
+        for port in regular_inputs:
+            name = port['name']
+            if name in controlled_inputs:
+                continue
+
+            ready_out = None
+            payload_inputs = []
+            valid_in = None
+
+            if name.endswith('_cmd_valid'):
+                prefix = name[:-len('_cmd_valid')]
+                ready_out = f"{prefix}_cmd_ready"
+                if ready_out in output_by_name:
+                    valid_in = name
+                    payload_inputs = sorted(
+                        (
+                            p for p in regular_inputs
+                            if p['name'].startswith(f"{prefix}_cmd_payload_")
+                        ),
+                        key=lambda p: p['name'],
+                    )
+            elif name.endswith('_tvalid'):
+                prefix = name[:-len('_tvalid')]
+                ready_out = f"{prefix}_tready"
+                if ready_out in output_by_name:
+                    valid_in = name
+                    payload_names = [
+                        f"{prefix}_tdata",
+                        f"{prefix}_tkeep",
+                        f"{prefix}_tstrb",
+                        f"{prefix}_tlast",
+                        f"{prefix}_tuser",
+                    ]
+                    payload_inputs = [input_by_name[pn] for pn in payload_names if pn in input_by_name]
+
+            if not valid_in or not ready_out:
+                continue
+
+            iface_id = unique_iface_id(prefix)
+            request_ifaces.append({
+                "id": iface_id,
+                "prefix": prefix,
+                "ready_out": ready_out,
+                "valid_in": valid_in,
+                "payload_inputs": payload_inputs,
+            })
+            controlled_inputs.add(valid_in)
+            for payload in payload_inputs:
+                controlled_inputs.add(payload['name'])
+
+        # Any remaining ready-style input gets a high-bias driver if the DUT
+        # has a matching valid output. This helps generic valid/ready sources.
+        for port in regular_inputs:
+            name = port['name']
+            if name in controlled_inputs:
+                continue
+            match = re.match(r'^(.*)_(cmd_)?ready$', name)
+            if not match:
+                continue
+            prefix = match.group(1)
+            candidate_outputs = [
+                f"{prefix}_cmd_valid",
+                f"{prefix}_valid",
+                f"{prefix}_tvalid",
+            ]
+            if any(candidate in output_by_name for candidate in candidate_outputs):
+                ready_bias_inputs.append(name)
+                controlled_inputs.add(name)
+
+        # Detect simple HLS-style control interfaces (ap_ctrl_hs) and drive
+        # them transactionally. Randomly toggling ap_start and mutating all
+        # memory/data inputs every cycle can leave these designs mostly idle
+        # or hide latency differences on result-side ports.
+        ap_start_in = input_by_name.get("ap_start")
+        if ap_start_in:
+            ap_done_out = "ap_done" if "ap_done" in output_by_name else None
+            ap_idle_out = "ap_idle" if "ap_idle" in output_by_name else None
+            ap_ready_out = "ap_ready" if "ap_ready" in output_by_name else None
+            if ap_done_out or ap_idle_out or ap_ready_out:
+                stable_inputs = [
+                    p for p in regular_inputs
+                    if p['name'] not in controlled_inputs and p['name'] != ap_start_in['name']
+                ]
+                hls_iface = {
+                    "id": unique_iface_id("hls_ap_ctrl"),
+                    "start_in": ap_start_in['name'],
+                    "done_out": ap_done_out,
+                    "idle_out": ap_idle_out,
+                    "ready_out": ap_ready_out,
+                    "stable_inputs": stable_inputs,
+                }
+                controlled_inputs.add(ap_start_in['name'])
+                for port in stable_inputs:
+                    controlled_inputs.add(port['name'])
+
+        # Skip reactive stimulus if requested — fall back to pure LFSR
+        if self.no_reactive:
+            response_ifaces.clear()
+            request_ifaces.clear()
+            ready_bias_inputs.clear()
+            hls_iface = None
+            controlled_inputs.clear()
+
         # Build port connections carefully to handle edge cases
         def build_port_connections(module_suffix=""):
             """Build port connection string for module instantiation."""
@@ -512,49 +800,210 @@ proc __vd_find_clock_ports {} {
                 connections.append(f".{port['name']}({module_suffix}{port['name']})")
             return ',\n        '.join(connections)
         
-        # Helper to generate stimulus for multi-bit signals
-        def generate_stimulus_code():
-            """Generate LFSR-based stimulus for all input ports."""
+        def generate_fallback_random_assignments() -> str:
+            """Generate plain LFSR stimulus for any input not covered by a reactive driver."""
             stim_lines = []
             lfsr_bit_index = 0
-            
             for port in regular_inputs:
+                if port['name'] in controlled_inputs:
+                    continue
                 name = port['name']
-                width = port['width']
-                
-                if width:  # Multi-bit port like [63:0]
-                    # Extract bit width from [high:low] format
-                    match = re.match(r'\[(\d+):(\d+)\]', width)
-                    if match:
-                        high = int(match.group(1))
-                        low = int(match.group(2))
-                        num_bits = high - low + 1
-                        
-                        # Use multiple LFSR iterations to generate enough bits
-                        if num_bits <= 32:
-                            stim_lines.append(f"            {name} = lfsr[{num_bits-1}:0];")
-                        else:
-                            # For large ports, use multiple LFSR values
-                            chunks = (num_bits + 31) // 32
-                            assignments = []
-                            for chunk in range(chunks):
-                                if chunk > 0:
-                                    stim_lines.append(f"            lfsr = lfsr_next(lfsr);")
-                                start_bit = chunk * 32
-                                end_bit = min(start_bit + 32, num_bits)
-                                if chunk == chunks - 1:
-                                    # Last chunk
-                                    assignments.append(f"{name}[{end_bit-1}:{start_bit}] = lfsr[{end_bit-start_bit-1}:0];")
-                                else:
-                                    assignments.append(f"{name}[{start_bit+31}:{start_bit}] = lfsr;")
-                            stim_lines.extend([f"            {a}" for a in assignments])
-                else:  # Single-bit port
+                bits = port_bit_width(port)
+                if bits == 1:
                     stim_lines.append(f"            {name} = lfsr[{lfsr_bit_index % 32}];")
                     lfsr_bit_index += 1
-            
-            return '\n'.join(stim_lines) if stim_lines else '            // No inputs to drive'
+                elif bits <= 32:
+                    stim_lines.append(f"            {name} = lfsr[{bits-1}:0];")
+                else:
+                    stim_lines.append(assign_from_seed(port, "lfsr"))
+            return '\n'.join(stim_lines) if stim_lines else '            // No fallback-random inputs'
+
+        def generate_env_declarations() -> str:
+            decls = []
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                decls.append(f"    reg env_{iface_id}_pending;")
+                decls.append(f"    integer env_{iface_id}_delay;")
+                decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                decls.append(f"    reg env_{iface_id}_active;")
+                decls.append(f"    reg env_{iface_id}_launch;")
+                decls.append(f"    integer env_{iface_id}_cycles;")
+                decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+            return '\n'.join(decls) if decls else '    // No reactive environment state'
+
+        def generate_env_init_code() -> str:
+            lines = []
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                lines.append(f"        env_{iface_id}_pending = 0;")
+                lines.append(f"        env_{iface_id}_delay = 0;")
+                lines.append(f"        env_{iface_id}_seed = 32'h{(0x13579BDF ^ (len(iface_id) * 0x1021)) & 0xFFFFFFFF:08X};")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                lines.append(f"        env_{iface_id}_active = 0;")
+                lines.append(f"        env_{iface_id}_launch = 0;")
+                lines.append(f"        env_{iface_id}_cycles = 0;")
+                lines.append(f"        env_{iface_id}_seed = 32'h2468ACE1;")
+            return '\n'.join(lines) if lines else '        // No reactive environment state to initialize'
+
+        def generate_negedge_stimulus_code() -> str:
+            lines = []
+
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                ready_in = iface['ready_in']
+                rsp_valid_in = iface['rsp_valid_in']
+
+                lines.append(f"            // Reactive responder for {iface['prefix']}")
+                if ready_in:
+                    lines.append(f"            if (env_{iface_id}_pending) begin")
+                    lines.append(f"                {ready_in} = 0;")
+                    lines.append("            end else begin")
+                    lines.append(f"                {ready_in} = 1;")
+                    lines.append("            end")
+
+                lines.append(f"            if (env_{iface_id}_pending && env_{iface_id}_delay == 0) begin")
+                lines.append(f"                {rsp_valid_in} = 1;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_error'):
+                        lines.append(f"                {payload_name} = 0;")
+                    elif payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 1;")
+                    else:
+                        lines.append(assign_from_seed(payload, f"env_{iface_id}_seed", indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {rsp_valid_in} = 0;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    lines.append(f"                {payload_name} = 0;")
+                lines.append("            end")
+
+            for iface in request_ifaces:
+                ready_expr = f"golden_{iface['ready_out']}"
+                lines.append(f"            // Reactive request driver for {iface['prefix']}")
+                lines.append(f"            if ({ready_expr}) begin")
+                lines.append(f"                {iface['valid_in']} = 1;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 1;")
+                    else:
+                        lines.append(assign_from_seed(payload, "lfsr", indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {iface['valid_in']} = lfsr[0];")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 0;")
+                    else:
+                        lines.append(assign_from_seed(payload, "lfsr", indent="                "))
+                lines.append("            end")
+
+            for ready_name in ready_bias_inputs:
+                lines.append(f"            {ready_name} = 1;")
+
+            if hls_iface:
+                iface_id = hls_iface['id']
+                start_in = hls_iface['start_in']
+                stable_inputs = hls_iface['stable_inputs']
+                lines.append("            // Transactional HLS control driver")
+                lines.append(f"            if (env_{iface_id}_launch) begin")
+                lines.append(f"                {start_in} = 1;")
+                for idx, port in enumerate(stable_inputs):
+                    seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
+                    lines.append(assign_from_seed(port, seed_expr, indent="                "))
+                lines.append("            end else if (env_{0}_active) begin".format(iface_id))
+                lines.append(f"                {start_in} = 0;")
+                for idx, port in enumerate(stable_inputs):
+                    seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
+                    lines.append(assign_from_seed(port, seed_expr, indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {start_in} = 0;")
+                for port in stable_inputs:
+                    lines.append(f"                {port['name']} = 0;")
+                lines.append("            end")
+
+            lines.append(generate_fallback_random_assignments())
+            return '\n'.join(lines)
+
+        def generate_posedge_bookkeeping_code() -> str:
+            lines = []
+            for idx, iface in enumerate(response_ifaces):
+                iface_id = iface['id']
+                cmd_valid_out = f"golden_{iface['cmd_valid_out']}"
+                ready_gate = iface['ready_in'] if iface['ready_in'] else "1'b1"
+                seed_mask = (0x9E3779B9 ^ (idx * 0x45D9F3B)) & 0xFFFFFFFF
+                lines.append(f"            if (env_{iface_id}_pending) begin")
+                lines.append(f"                if (env_{iface_id}_delay > 0) begin")
+                lines.append(f"                    env_{iface_id}_delay = env_{iface_id}_delay - 1;")
+                lines.append("                end else begin")
+                lines.append(f"                    env_{iface_id}_pending = 0;")
+                lines.append("                end")
+                lines.append(f"            end else if ({cmd_valid_out} && {ready_gate}) begin")
+                lines.append(f"                env_{iface_id}_pending = 1;")
+                lines.append(f"                env_{iface_id}_delay = lfsr[0];")
+                lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'h{seed_mask:08X};")
+                lines.append("            end")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                done_expr = f"golden_{hls_iface['done_out']}" if hls_iface['done_out'] else "1'b0"
+                idle_expr = f"golden_{hls_iface['idle_out']}" if hls_iface['idle_out'] else "1'b0"
+                ready_expr = f"golden_{hls_iface['ready_out']}" if hls_iface['ready_out'] else "1'b0"
+                launch_condition = f"({idle_expr} || {ready_expr})"
+                lines.append(f"            if (env_{iface_id}_launch) begin")
+                lines.append(f"                env_{iface_id}_launch = 0;")
+                lines.append(f"                env_{iface_id}_cycles = 1;")
+                lines.append(f"            end else if (env_{iface_id}_active) begin")
+                lines.append(f"                env_{iface_id}_cycles = env_{iface_id}_cycles + 1;")
+                lines.append(f"                if ({done_expr} || (({ready_expr}) && env_{iface_id}_cycles > 1)) begin")
+                lines.append(f"                    env_{iface_id}_active = 0;")
+                lines.append(f"                    env_{iface_id}_cycles = 0;")
+                lines.append("                end")
+                lines.append(f"            end else if ({launch_condition}) begin")
+                lines.append(f"                env_{iface_id}_active = 1;")
+                lines.append(f"                env_{iface_id}_launch = 1;")
+                lines.append(f"                env_{iface_id}_cycles = 0;")
+                lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'hA5A55A5A;")
+                lines.append("            end")
+            return '\n'.join(lines) if lines else '            // No reactive bookkeeping required'
+
+        def generate_protocol_compare_code() -> str:
+            protocol_outputs = []
+            seen_protocol_outputs = set()
+
+            def add_protocol_output(name: Optional[str]):
+                if name and name in output_by_name and name not in seen_protocol_outputs:
+                    seen_protocol_outputs.add(name)
+                    protocol_outputs.append(name)
+
+            for iface in response_ifaces:
+                add_protocol_output(iface['cmd_valid_out'])
+            for iface in request_ifaces:
+                add_protocol_output(iface['ready_out'])
+            if hls_iface:
+                add_protocol_output(hls_iface['done_out'])
+                add_protocol_output(hls_iface['idle_out'])
+                add_protocol_output(hls_iface['ready_out'])
+
+            lines = []
+            for name in protocol_outputs:
+                lines.append(f'''
+            if (golden_{name} !== revised_{name}) begin
+                $display("PROTOCOL MISMATCH at cycle %0d: {name} golden=%h revised=%h", cycle_count, golden_{name}, revised_{name});
+                protocol_mismatch_count = protocol_mismatch_count + 1;
+            end''')
+            return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
         
         # Generate testbench
+        compare_body = chr(10).join(f'''
+            if (golden_{port['name']} !== revised_{port['name']}) begin
+                $display("MISMATCH at cycle %0d: {port['name']} golden=%h revised=%h", cycle_count, golden_{port['name']}, revised_{port['name']});
+                mismatch_count = mismatch_count + 1;
+            end''' for port in outputs) if outputs else '            // No outputs to compare'
+
         tb_content = f"""
 `timescale 1ns / 1ps
 
@@ -573,6 +1022,9 @@ module testbench;
     
     // LFSR for pseudo-random input generation
     reg [31:0] lfsr = 32'hDEADBEEF;
+    
+    // Reactive environment state
+{generate_env_declarations()}
     
     // Instantiate golden design
     {golden_module} golden_dut (
@@ -600,11 +1052,14 @@ module testbench;
     
     // Test stimulus and checking
     integer mismatch_count;
+    integer protocol_mismatch_count;
     integer cycle_count;
     
     initial begin
         mismatch_count = 0;
+        protocol_mismatch_count = 0;
         cycle_count = 0;
+{generate_env_init_code()}
         
         // Reset
         {''+reset+' = 1;' if reset else ''}
@@ -612,32 +1067,39 @@ module testbench;
         repeat(10) @(posedge {clock});
         {''+reset+' = 0;' if reset else ''}
         
-        // Warm-up period: fill pipeline without checking outputs
-        // (for pipelined designs, outputs may be X until pipeline fills)
+        // Warm-up period: fill pipeline without checking outputs.
+        // Drive inputs on the inactive edge so sequential logic sees stable
+        // values before the active clock edge.
         repeat(50) begin
-            @(posedge {clock});
+            @(negedge {clock});
             lfsr = lfsr_next(lfsr);
-{generate_stimulus_code()}
+{generate_negedge_stimulus_code()}
+            @(posedge {clock});
+{generate_posedge_bookkeeping_code()}
+            #1;
+{generate_protocol_compare_code()}
         end
         
         // Run test vectors with output checking
         repeat({self.num_vectors}) begin
+            // Generate new inputs from LFSR
+            @(negedge {clock});
+            lfsr = lfsr_next(lfsr);
+{generate_negedge_stimulus_code()}
+
+            // Sample outputs on the following active edge
             @(posedge {clock});
             cycle_count = cycle_count + 1;
-            
-            // Generate new inputs from LFSR
-            lfsr = lfsr_next(lfsr);
-{generate_stimulus_code()}
+{generate_posedge_bookkeeping_code()}
             
             // Check outputs after settling
             #1; // Small delay for output settling
             
             // Compare all outputs
-            {chr(10).join(f'''
-            if (golden_{port['name']} !== revised_{port['name']}) begin
-                $display("MISMATCH at cycle %0d: {port['name']} golden=%h revised=%h", cycle_count, golden_{port['name']}, revised_{port['name']});
-                mismatch_count = mismatch_count + 1;
-            end''' for port in outputs) if outputs else '            // No outputs to compare'}
+{compare_body}
+
+            // Compare protocol outputs that drive the reactive environment
+{generate_protocol_compare_code()}
         end
         
         // Report results
@@ -646,7 +1108,8 @@ module testbench;
         $display("=======================================");
         $display("Cycles simulated: %0d", cycle_count);
         {'$display("Outputs compared: 0 (design has no outputs)");' if not outputs else '$display("Mismatches found: %0d", mismatch_count);'}
-        if (mismatch_count == 0) begin
+        $display("Protocol mismatches found: %0d", protocol_mismatch_count);
+        if (mismatch_count == 0 && protocol_mismatch_count == 0) begin
             {'$display("Result: PASS (no crashes detected)");' if not outputs else '$display("Result: PASS");'}
             $finish(0);
         end else begin
@@ -986,37 +1449,42 @@ endmodule
             with open(log_file, 'w') as f:
                 f.write(sim_output)
             
-            # Extract results
-            mismatch_count = 0
-            cycles_simulated = 0
-            
+            parse_result = parse_simulation_output(
+                sim_output,
+                result.returncode,
+                self.num_vectors,
+            )
+
             for line in sim_output.split('\n'):
                 if 'MISMATCH' in line:
-                    mismatch_count += 1
                     print(f"  {line}")
-                elif 'Cycles simulated:' in line:
-                    match = re.search(r'Cycles simulated:\s*(\d+)', line)
-                    if match:
-                        cycles_simulated = int(match.group(1))
-                elif 'Mismatches found:' in line:
-                    match = re.search(r'Mismatches found:\s*(\d+)', line)
-                    if match:
-                        mismatch_count = int(match.group(1))
-            
+
             self.simulation_report = {
-                "cycles_simulated": cycles_simulated,
-                "mismatch_count": mismatch_count,
-                "log_file": str(log_file)
+                "cycles_simulated": parse_result["cycles_simulated"],
+                "mismatch_count": parse_result["mismatch_count"],
+                "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
+                "log_file": str(log_file),
+                "result_pass_seen": parse_result["result_pass_seen"],
+                "result_fail_seen": parse_result["result_fail_seen"],
+                "simulator_failed": parse_result["simulator_failed"],
+                "returncode": parse_result["returncode"],
             }
             
-            # Check if passed
-            self.phase2_passed = (mismatch_count == 0 and result.returncode == 0)
+            # Check if passed. xsim can report an internal simulator failure
+            # while still returning 0, so require the testbench's explicit
+            # completion marker and expected cycle count.
+            self.phase2_passed = parse_result["passed"]
             
             print("\n" + "-"*70)
             print(f"Simulation Results:")
-            print(f"  Cycles: {cycles_simulated}")
-            print(f"  Mismatches: {mismatch_count}")
+            print(f"  Cycles: {parse_result['cycles_simulated']}")
+            print(f"  Mismatches: {parse_result['mismatch_count']}")
+            print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
             print(f"  Log: {log_file}")
+            if parse_result["simulator_failed"]:
+                print("  Simulator reported an internal failure")
+            if not parse_result["result_pass_seen"] and result.returncode == 0:
+                print("  Testbench PASS marker not found")
             
             if self.phase2_passed:
                 print("\nPhase 2: PASSED ✓")
@@ -1104,6 +1572,7 @@ endmodule
             if self.simulation_report:
                 print(f"  Cycles: {self.simulation_report.get('cycles_simulated', 0)}")
                 print(f"  Mismatches: {self.simulation_report.get('mismatch_count', 0)}")
+                print(f"  Protocol mismatches: {self.simulation_report.get('protocol_mismatch_count', 0)}")
         
         print()
         if self.phase2_skipped:
@@ -1166,7 +1635,12 @@ Examples:
         action="store_true",
         help="Enable debug logging"
     )
-    
+    parser.add_argument(
+        "--no-reactive",
+        action="store_true",
+        help="Disable reactive stimulus generation (use pure LFSR randomness)"
+    )
+
     args = parser.parse_args()
     
     # Validate inputs
@@ -1186,7 +1660,8 @@ Examples:
         golden_dcp=args.golden_dcp,
         revised_dcp=args.revised_dcp,
         num_vectors=args.vectors,
-        debug=args.debug
+        debug=args.debug,
+        no_reactive=args.no_reactive
     )
     
     try:
