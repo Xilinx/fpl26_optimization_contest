@@ -42,10 +42,15 @@ export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
 # Benchmark archive from GitHub release
-BENCHMARK_VERSION := v1.0.0
+BENCHMARK_VERSION := v1.1.0
 BENCHMARK_TARBALL := fpl26_contest_benchmarks_$(BENCHMARK_VERSION).tar.gz
 BENCHMARK_DIR := fpl26_contest_benchmarks
 BENCHMARK_URL := https://github.com/Xilinx/fpl26_optimization_contest/releases/download/$(BENCHMARK_VERSION)/$(BENCHMARK_TARBALL)
+# Version marker written into the extracted benchmark directory so `make setup`
+# can detect when an older archive was extracted previously and needs to be
+# refreshed. Without this, `make setup` would silently keep a stale
+# fpl26_contest_benchmarks/ from a previous BENCHMARK_VERSION.
+BENCHMARK_VERSION_FILE := $(BENCHMARK_DIR)/.benchmark_version
 
 # Example DCP paths (inside the extracted benchmark directory)
 EXAMPLE_DCP_1 := $(BENCHMARK_DIR)/logicnets_jscl_2025.1.dcp
@@ -161,9 +166,20 @@ setup:
 	@echo ""
 	
 	@printf "$(COLOR_YELLOW)[5/5] Downloading and extracting benchmark DCPs...$(COLOR_RESET)\n"
-	@if [ -d "$(BENCHMARK_DIR)" ] && [ -f "$(EXAMPLE_DCP_1)" ]; then \
-		printf "$(COLOR_GREEN)✓ $(BENCHMARK_DIR)/ already exists$(COLOR_RESET)\n"; \
+	@if [ -d "$(BENCHMARK_DIR)" ] && [ -f "$(EXAMPLE_DCP_1)" ] && \
+	    [ -f "$(BENCHMARK_VERSION_FILE)" ] && \
+	    [ "$$(cat $(BENCHMARK_VERSION_FILE))" = "$(BENCHMARK_VERSION)" ]; then \
+		printf "$(COLOR_GREEN)✓ $(BENCHMARK_DIR)/ already exists for $(BENCHMARK_VERSION)$(COLOR_RESET)\n"; \
 	else \
+		if [ -d "$(BENCHMARK_DIR)" ]; then \
+			if [ -f "$(BENCHMARK_VERSION_FILE)" ]; then \
+				EXISTING_VERSION=$$(cat "$(BENCHMARK_VERSION_FILE)"); \
+				printf "$(COLOR_YELLOW)Existing $(BENCHMARK_DIR)/ is version %s; refreshing to $(BENCHMARK_VERSION)...$(COLOR_RESET)\n" "$$EXISTING_VERSION"; \
+			else \
+				printf "$(COLOR_YELLOW)Existing $(BENCHMARK_DIR)/ has no version marker; refreshing to $(BENCHMARK_VERSION)...$(COLOR_RESET)\n"; \
+			fi; \
+			rm -rf "$(BENCHMARK_DIR)"; \
+		fi; \
 		if [ ! -f "$(BENCHMARK_TARBALL)" ]; then \
 			printf "Downloading $(BENCHMARK_TARBALL)...\n"; \
 			if command -v wget >/dev/null 2>&1; then \
@@ -179,7 +195,8 @@ setup:
 		fi; \
 		printf "Extracting $(BENCHMARK_TARBALL)...\n"; \
 		tar xzf $(BENCHMARK_TARBALL); \
-		printf "$(COLOR_GREEN)✓ Benchmarks extracted to $(BENCHMARK_DIR)/$(COLOR_RESET)\n"; \
+		echo "$(BENCHMARK_VERSION)" > "$(BENCHMARK_VERSION_FILE)"; \
+		printf "$(COLOR_GREEN)✓ Benchmarks extracted to $(BENCHMARK_DIR)/ ($(BENCHMARK_VERSION))$(COLOR_RESET)\n"; \
 	fi
 	@echo ""
 	

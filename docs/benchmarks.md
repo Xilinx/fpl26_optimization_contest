@@ -8,20 +8,20 @@ tables.
 ## Download
 
 The benchmark DCP files are available as a single archive from the
-[v1.0.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.0.0):
+[v1.1.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.1.0):
 
 | File | Size |
 |------|------|
-| [`fpl26_contest_benchmarks_v1.0.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.0.0/fpl26_contest_benchmarks_v1.0.0.tar.gz) | ~511 MB |
-| [`fpl26_contest_benchmarks_v1.0.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.0.0/fpl26_contest_benchmarks_v1.0.0.md5) | checksum |
+| [`fpl26_contest_benchmarks_v1.1.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.1.0/fpl26_contest_benchmarks_v1.1.0.tar.gz) | ~525 MB |
+| [`fpl26_contest_benchmarks_v1.1.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.1.0/fpl26_contest_benchmarks_v1.1.0.md5) | checksum |
 
 After downloading, extract the archive in the repository root:
 
 ```bash
-tar xzf fpl26_contest_benchmarks_v1.0.0.tar.gz
+tar xzf fpl26_contest_benchmarks_v1.1.0.tar.gz
 ```
 
-This creates a `fpl26_contest_benchmarks/` directory containing all 12 benchmark
+This creates a `fpl26_contest_benchmarks/` directory containing all 13 benchmark
 DCP files. Alternatively, `make setup` will download and extract the benchmarks
 automatically.
 
@@ -40,14 +40,23 @@ automatically.
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_optical-flow`                           |34k  |37k |42  |61   |324.9 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_spam-filter`                            |5k   |13k |224 |3    |437.4 |
 | [VexRiscv](https://github.com/SpinalHDL/VexRiscv)      |`vexriscv_re-place`                               |2k   |1k  |4   |6    |310.2 |
+| [VexRiscv](https://github.com/SpinalHDL/VexRiscv)      |`vexriscv_re-place_v2` †                          |2k   |2k  |4   |4    |397.5 |
 | [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) |`vtr_mcml`                         |43k  |15k |105 |142  |62.2  |
+
+† `vexriscv_re-place_v2` was held back as a *hidden* benchmark during the alpha
+submission round and was not made available to contestants until after that
+round closed. It was released publicly as part of the
+[v1.1.0 benchmark archive](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.1.0)
+and is included in the suite for the remainder of the contest.
 
 
 ## Baseline Agent Results
 
 The following table shows the Fmax improvement achieved by the optimization agent
-(`dcp_optimizer.py`) on each benchmark design. All timing is measured on the
-`clk_fpl26contest` clock domain. Each design was given a maximum runtime of 1 hour.
+(`dcp_optimizer.py`) on the 12 benchmarks that were public during the alpha
+submission round. The hidden alpha benchmark `vexriscv_re-place_v2` is not
+covered in this table. All timing is measured on the `clk_fpl26contest` clock
+domain. Each design was given a maximum runtime of 1 hour.
 
 | Benchmark | Initial Fmax (MHz) | Best Fmax (MHz) | Improvement (MHz) | Improvement (%) | WNS Change (ns) | Runtime | Status |
 |---|---:|---:|---:|---:|---|---:|---|

@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Default model
-DEFAULT_MODEL = "x-ai/grok-4.1-fast"
+DEFAULT_MODEL = "google/gemini-3.1-flash-lite"
 
 
 def parse_timing_summary_static(timing_report: str) -> dict:
