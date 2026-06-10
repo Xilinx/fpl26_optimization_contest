@@ -133,6 +133,26 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
         and protocol_mismatch_count == 0
     )
 
+    # A definitive logical FAIL (testbench mismatch) must never be promoted to
+    # an infrastructure failure. Otherwise a revised netlist that both mismatches
+    # and provokes a fatal-pattern xsim message would be tagged INFRASTRUCTURE
+    # FAILURE (exit 2 / retry) instead of a clean FAIL (exit 1 / score 0).
+    definitive_fail = (
+        result_fail_seen
+        or mismatch_count > 0
+        or protocol_mismatch_count > 0
+    )
+    infrastructure_failure = not definitive_fail and (
+        simulator_failed
+        or (not result_pass_seen and not result_fail_seen)
+    )
+    infrastructure_reason = None
+    if infrastructure_failure:
+        if simulator_failed:
+            infrastructure_reason = "simulator_failed"
+        elif not result_pass_seen and not result_fail_seen:
+            infrastructure_reason = "testbench_completion_marker_missing"
+
     return {
         "cycles_simulated": cycles_simulated,
         "mismatch_count": mismatch_count,
@@ -140,6 +160,8 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
         "result_pass_seen": result_pass_seen,
         "result_fail_seen": result_fail_seen,
         "simulator_failed": simulator_failed,
+        "infrastructure_failure": infrastructure_failure,
+        "infrastructure_reason": infrastructure_reason,
         "returncode": returncode,
         "passed": passed,
     }
@@ -147,11 +169,20 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
 
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
-    
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False, no_reactive: bool = False):
+
+    def __init__(
+        self,
+        golden_dcp: Path,
+        revised_dcp: Path,
+        num_vectors: int = 200,
+        precheck_vectors: int = 100,
+        debug: bool = False,
+        no_reactive: bool = False,
+    ):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
+        self.precheck_vectors = precheck_vectors
         self.debug = debug
         self.no_reactive = no_reactive
         
@@ -172,7 +203,116 @@ class DCPValidator:
         self.phase2_skip_reason = None
         self.structural_report = None
         self.simulation_report = None
-    
+        self.preflight_report = None
+        self.infrastructure_failure = False
+        self.infrastructure_reason = None
+
+    def _copy_dcp_for_rapidwright(self, src_dcp: Path, label: str) -> Path:
+        """Copy a DCP into validator-owned space and build a fresh EDIF sidecar.
+
+        RapidWright may consult ``<dcp>.edf`` sidecars when loading DCPs. For
+        contest submissions, sidecars beside the submitted DCP should not be
+        trusted or required, so create a clean copy and matching sidecar in this
+        validation run directory.
+        """
+        if not src_dcp.exists():
+            raise FileNotFoundError(f"{label} DCP not found: {src_dcp}")
+
+        prepared_dcp = self.temp_dir / f"{label}.dcp"
+        shutil.copy2(src_dcp, prepared_dcp)
+
+        unzip_result = subprocess.run(
+            ["unzip", "-t", str(prepared_dcp)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if unzip_result.returncode != 0:
+            detail = (unzip_result.stdout + unzip_result.stderr).strip()
+            raise RuntimeError(f"{label} DCP failed zip integrity check: {detail}")
+
+        sidecar_dir = self.temp_dir / f"{label}.dcp.edf"
+        if sidecar_dir.exists():
+            shutil.rmtree(sidecar_dir)
+        sidecar_dir.mkdir()
+        sidecar_edf = sidecar_dir / f"{label}.edf"
+        sidecar_md5 = sidecar_dir / f"{label}.dcp.md5"
+
+        tcl = (
+            f"open_checkpoint {{{prepared_dcp}}}\n"
+            f"write_edif -force {{{sidecar_edf}}}\n"
+            "close_design\n"
+        )
+        vivado_path = os.environ.get("VIVADO_EXEC")
+        if vivado_path:
+            if "/" not in vivado_path:
+                vivado_path = shutil.which(vivado_path)
+        else:
+            vivado_path = shutil.which("vivado")
+        if not vivado_path:
+            raise RuntimeError("Vivado not found in PATH. Set VIVADO_EXEC env var or add Vivado to PATH.")
+
+        tcl_path = self.temp_dir / f"prepare_{label}_readable_edif.tcl"
+        tcl_path.write_text(tcl)
+        log_path = self.temp_dir / f"prepare_{label}_readable_edif.log"
+        jou_path = self.temp_dir / f"prepare_{label}_readable_edif.jou"
+        result = subprocess.run(
+            [
+                vivado_path,
+                "-mode", "batch",
+                "-source", str(tcl_path),
+                "-log", str(log_path),
+                "-journal", str(jou_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        if result.returncode != 0 or not sidecar_edf.exists() or sidecar_edf.stat().st_size == 0:
+            detail = (result.stdout + result.stderr).strip()
+            raise RuntimeError(
+                f"{label} DCP opened, but readable EDIF generation failed. "
+                f"Log: {log_path}. {detail[-1000:]}"
+            )
+
+        md5_result = subprocess.run(
+            ["md5sum", str(prepared_dcp)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        sidecar_md5.write_text(md5_result.stdout.split()[0] + "\n")
+
+        return prepared_dcp
+
+    def _is_rapidwright_readability_error(self, report: dict) -> bool:
+        """Return true for RapidWright DCP/EDIF cache/read failures."""
+        error = str(report.get("error", ""))
+        patterns = [
+            "Unable to find a readable EDIF file",
+            "ZipException",
+            "zip archive",
+            "dcp.xml",
+            "Failed to auto-generate an EDIF file",
+            "invalid LOC header",
+            "bad signature",
+        ]
+        return any(pattern in error for pattern in patterns)
+
+    async def _compare_design_structures(self, golden_dcp: Path, revised_dcp: Path) -> dict:
+        result = await self.rapidwright_session.call_tool("compare_design_structure", {
+            "golden_dcp": str(golden_dcp),
+            "revised_dcp": str(revised_dcp),
+        })
+
+        if result.content:
+            text_parts = [c.text for c in result.content if hasattr(c, 'text')]
+            result_text = "\n".join(text_parts)
+            return json.loads(result_text)
+
+        return {"error": "No response from tool"}
+
     async def start_servers(self):
         """Start both MCP servers."""
         script_dir = Path(__file__).parent.resolve()
@@ -245,19 +385,53 @@ class DCPValidator:
         # Compare designs
         logger.info("Comparing design structures...")
         print("\nComparing design structures...")
-        
-        result = await self.rapidwright_session.call_tool("compare_design_structure", {
-            "golden_dcp": str(self.golden_dcp.resolve()),
-            "revised_dcp": str(self.revised_dcp.resolve())
-        })
-        
-        # Parse result
-        if result.content:
-            text_parts = [c.text for c in result.content if hasattr(c, 'text')]
-            result_text = "\n".join(text_parts)
-            self.structural_report = json.loads(result_text)
+
+        self.structural_report = await self._compare_design_structures(
+            self.golden_dcp.resolve(),
+            self.revised_dcp.resolve(),
+        )
+
+        if (
+            "error" in self.structural_report
+            and self._is_rapidwright_readability_error(self.structural_report)
+        ):
+            initial_error = self.structural_report["error"]
+            print("\nRapidWright could not read one of the DCPs directly.")
+            print("Preparing validator-owned DCP copies and readable EDIF sidecars, then retrying...")
+            try:
+                prepared_golden = self._copy_dcp_for_rapidwright(self.golden_dcp.resolve(), "golden")
+                prepared_revised = self._copy_dcp_for_rapidwright(self.revised_dcp.resolve(), "revised")
+                self.preflight_report = {
+                    "status": "success",
+                    "reason": "rapidwright_readability_retry",
+                    "initial_error": initial_error,
+                    "golden_prepared_dcp": str(prepared_golden),
+                    "revised_prepared_dcp": str(prepared_revised),
+                }
+                self.structural_report = await self._compare_design_structures(
+                    prepared_golden,
+                    prepared_revised,
+                )
+                if "error" in self.structural_report:
+                    self.structural_report["preflight_report"] = self.preflight_report
+            except Exception as e:
+                self.preflight_report = {
+                    "status": "error",
+                    "stage": "rapidwright_dcp_preparation",
+                    "initial_error": initial_error,
+                    "error": str(e),
+                }
+                self.structural_report = {
+                    "error": str(e),
+                    "preflight_report": self.preflight_report,
+                }
+                print(f"\n✗ DCP preflight retry failed: {e}")
+                return False
         else:
-            self.structural_report = {"error": "No response from tool"}
+            self.preflight_report = {
+                "status": "not_needed",
+                "reason": "rapidwright_direct_compare_succeeded_or_non_readability_failure",
+            }
         
         # Check if passed
         if "error" in self.structural_report:
@@ -1054,11 +1228,17 @@ module testbench;
     integer mismatch_count;
     integer protocol_mismatch_count;
     integer cycle_count;
+    integer num_vectors;
     
     initial begin
         mismatch_count = 0;
         protocol_mismatch_count = 0;
         cycle_count = 0;
+        num_vectors = {self.num_vectors};
+        if (!$value$plusargs("NUM_VECTORS=%d", num_vectors)) begin
+            num_vectors = {self.num_vectors};
+        end
+        $display("Configured test vectors: %0d", num_vectors);
 {generate_env_init_code()}
         
         // Reset
@@ -1081,7 +1261,7 @@ module testbench;
         end
         
         // Run test vectors with output checking
-        repeat({self.num_vectors}) begin
+        repeat(num_vectors) begin
             // Generate new inputs from LFSR
             @(negedge {clock});
             lfsr = lfsr_next(lfsr);
@@ -1120,7 +1300,8 @@ module testbench;
     
     // Timeout watchdog (reset + warmup + test cycles, with 2x safety margin)
     initial begin
-        #{(10 + 50 + self.num_vectors) * 20} $display("ERROR: Simulation timeout"); $finish(2);
+        #1;
+        #((10 + 50 + num_vectors) * 20) $display("ERROR: Simulation timeout"); $finish(2);
     end
 
 endmodule
@@ -1347,7 +1528,8 @@ endmodule
             # corescore_500_mod) measured ~0.3s/cycle. We add a generous baseline
             # for kernel init and cap below by 60 min so small designs still get
             # a comfortable budget.
-            xsim_timeout_s = max(3600, 600 + int(self.num_vectors * 1.0))
+            def xsim_timeout_for(vector_count: int) -> int:
+                return max(3600, 600 + int(vector_count * 1.0))
             
             current_step = "xvlog (compilation)"
             result = subprocess.run(
@@ -1422,75 +1604,150 @@ endmodule
             
             print("✓ Elaboration successful")
             
-            # Run simulation
-            logger.info("Running simulation with xsim...")
-            print(f"\nSimulating {self.num_vectors} test vectors...")
-            
-            sim_cmd = [
-                "xsim",
-                "testbench_sim",
-                "-R"
-            ]
-            
-            current_step = "xsim (simulation)"
-            result = subprocess.run(
-                sim_cmd,
-                cwd=xsim_dir,
-                capture_output=True,
-                text=True,
-                timeout=xsim_timeout_s
-            )
-            
-            # Parse simulation output
-            sim_output = result.stdout + result.stderr
-            
-            # Save simulation log
-            log_file = self.temp_dir / "simulation.log"
-            with open(log_file, 'w') as f:
-                f.write(sim_output)
-            
-            parse_result = parse_simulation_output(
-                sim_output,
-                result.returncode,
-                self.num_vectors,
-            )
+            def run_xsim(vector_count: int, label: str) -> dict:
+                logger.info(f"Running {label} simulation with xsim ({vector_count} vectors)...")
+                print(f"\nSimulating {vector_count} test vectors ({label})...")
 
-            for line in sim_output.split('\n'):
-                if 'MISMATCH' in line:
-                    print(f"  {line}")
+                sim_cmd = [
+                    "xsim",
+                    "testbench_sim",
+                    "-R",
+                    "--testplusarg", f"NUM_VECTORS={vector_count}",
+                ]
+
+                result = subprocess.run(
+                    sim_cmd,
+                    cwd=xsim_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=xsim_timeout_for(vector_count)
+                )
+
+                sim_output = result.stdout + result.stderr
+
+                log_file = self.temp_dir / f"simulation_{label}.log"
+                with open(log_file, 'w') as f:
+                    f.write(sim_output)
+
+                if label == "full":
+                    # Preserve the historical log path for scripts/users that
+                    # expect a single final simulation.log.
+                    final_log = self.temp_dir / "simulation.log"
+                    with open(final_log, 'w') as f:
+                        f.write(sim_output)
+
+                parse_result = parse_simulation_output(
+                    sim_output,
+                    result.returncode,
+                    vector_count,
+                )
+
+                for line in sim_output.split('\n'):
+                    if 'MISMATCH' in line:
+                        print(f"  {line}")
+
+                report = {
+                    "vectors_requested": vector_count,
+                    "cycles_simulated": parse_result["cycles_simulated"],
+                    "mismatch_count": parse_result["mismatch_count"],
+                    "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
+                    "log_file": str(log_file),
+                    "result_pass_seen": parse_result["result_pass_seen"],
+                    "result_fail_seen": parse_result["result_fail_seen"],
+                    "simulator_failed": parse_result["simulator_failed"],
+                    "infrastructure_failure": parse_result["infrastructure_failure"],
+                    "infrastructure_reason": parse_result["infrastructure_reason"],
+                    "returncode": parse_result["returncode"],
+                    "passed": parse_result["passed"],
+                }
+
+                print("\n" + "-"*70)
+                print(f"Simulation Results ({label}):")
+                print(f"  Requested vectors: {vector_count}")
+                print(f"  Cycles: {parse_result['cycles_simulated']}")
+                print(f"  Mismatches: {parse_result['mismatch_count']}")
+                print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
+                print(f"  Log: {log_file}")
+                if parse_result["simulator_failed"]:
+                    print("  Simulator reported an internal failure")
+                if not parse_result["result_pass_seen"] and result.returncode == 0:
+                    print("  Testbench PASS marker not found")
+                print(f"  Result: {'PASSED' if parse_result['passed'] else 'FAILED'}")
+                print("-"*70)
+
+                return report
+
+            current_step = "xsim (precheck simulation)"
+            precheck_report = None
+            run_precheck = (
+                self.precheck_vectors > 0
+                and self.precheck_vectors < self.num_vectors
+            )
+            if run_precheck:
+                precheck_report = run_xsim(self.precheck_vectors, "precheck")
+                if not precheck_report["passed"]:
+                    self.simulation_report = {
+                        "precheck_vectors": self.precheck_vectors,
+                        "precheck_passed": False,
+                        "precheck_report": precheck_report,
+                        "full_vectors": self.num_vectors,
+                        "full_run_skipped": True,
+                        "cycles_simulated": precheck_report["cycles_simulated"],
+                        "mismatch_count": precheck_report["mismatch_count"],
+                        "protocol_mismatch_count": precheck_report["protocol_mismatch_count"],
+                        "log_file": precheck_report["log_file"],
+                        "result_pass_seen": precheck_report["result_pass_seen"],
+                        "result_fail_seen": precheck_report["result_fail_seen"],
+                        "simulator_failed": precheck_report["simulator_failed"],
+                        "infrastructure_failure": precheck_report["infrastructure_failure"],
+                        "infrastructure_reason": precheck_report["infrastructure_reason"],
+                        "returncode": precheck_report["returncode"],
+                    }
+                    if precheck_report["infrastructure_failure"]:
+                        self.infrastructure_failure = True
+                        self.infrastructure_reason = precheck_report["infrastructure_reason"]
+                    self.phase2_passed = False
+                    if self.infrastructure_failure:
+                        print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (precheck crashed or did not complete; full run skipped)")
+                    else:
+                        print("\nPhase 2: FAILED ✗ (precheck failed; full run skipped)")
+                    return False
+
+            current_step = "xsim (full simulation)"
+            full_report = run_xsim(self.num_vectors, "full")
 
             self.simulation_report = {
-                "cycles_simulated": parse_result["cycles_simulated"],
-                "mismatch_count": parse_result["mismatch_count"],
-                "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
-                "log_file": str(log_file),
-                "result_pass_seen": parse_result["result_pass_seen"],
-                "result_fail_seen": parse_result["result_fail_seen"],
-                "simulator_failed": parse_result["simulator_failed"],
-                "returncode": parse_result["returncode"],
+                "precheck_vectors": self.precheck_vectors if run_precheck else None,
+                "precheck_passed": precheck_report["passed"] if precheck_report else None,
+                "precheck_report": precheck_report,
+                "full_vectors": self.num_vectors,
+                "full_report": full_report,
+                "cycles_simulated": full_report["cycles_simulated"],
+                "mismatch_count": full_report["mismatch_count"],
+                "protocol_mismatch_count": full_report["protocol_mismatch_count"],
+                "log_file": str(self.temp_dir / "simulation.log"),
+                "result_pass_seen": full_report["result_pass_seen"],
+                "result_fail_seen": full_report["result_fail_seen"],
+                "simulator_failed": full_report["simulator_failed"],
+                "infrastructure_failure": full_report["infrastructure_failure"],
+                "infrastructure_reason": full_report["infrastructure_reason"],
+                "returncode": full_report["returncode"],
             }
-            
+
             # Check if passed. xsim can report an internal simulator failure
             # while still returning 0, so require the testbench's explicit
             # completion marker and expected cycle count.
-            self.phase2_passed = parse_result["passed"]
-            
-            print("\n" + "-"*70)
-            print(f"Simulation Results:")
-            print(f"  Cycles: {parse_result['cycles_simulated']}")
-            print(f"  Mismatches: {parse_result['mismatch_count']}")
-            print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
-            print(f"  Log: {log_file}")
-            if parse_result["simulator_failed"]:
-                print("  Simulator reported an internal failure")
-            if not parse_result["result_pass_seen"] and result.returncode == 0:
-                print("  Testbench PASS marker not found")
-            
+            self.phase2_passed = full_report["passed"]
+            if full_report["infrastructure_failure"]:
+                self.infrastructure_failure = True
+                self.infrastructure_reason = full_report["infrastructure_reason"]
+
             if self.phase2_passed:
                 print("\nPhase 2: PASSED ✓")
+            elif self.infrastructure_failure:
+                print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘")
             else:
                 print("\nPhase 2: FAILED ✗")
-            print("-"*70)
             
             return self.phase2_passed
             
@@ -1501,10 +1758,26 @@ endmodule
                 f"subprocess.TimeoutExpired in step '{current_step}' "
                 f"(timeout={timeout_s}s)"
             )
+            self.infrastructure_failure = True
+            self.infrastructure_reason = f"timeout_in_{current_step}"
+            self.simulation_report = {
+                "infrastructure_failure": True,
+                "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
+                "timeout_seconds": timeout_s,
+            }
             return False
         except Exception as e:
             print(f"\n✗ Simulation error in {current_step}: {e}")
             logger.exception(f"Error in step '{current_step}'")
+            self.infrastructure_failure = True
+            self.infrastructure_reason = f"exception_in_{current_step}"
+            self.simulation_report = {
+                "infrastructure_failure": True,
+                "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
+                "error": str(e),
+            }
             return False
     
     async def validate(self) -> bool:
@@ -1517,6 +1790,8 @@ endmodule
         print(f"Golden:  {self.golden_dcp}")
         print(f"Revised: {self.revised_dcp}")
         print(f"Vectors: {self.num_vectors}")
+        if 0 < self.precheck_vectors < self.num_vectors:
+            print(f"Precheck vectors: {self.precheck_vectors}")
         print("="*70)
         
         # Phase 1: Structural checks
@@ -1567,9 +1842,27 @@ endmodule
         if self.phase2_skipped:
             print("Phase 2 (Simulation): SKIPPED ⊘")
             print(f"  Reason: {self.phase2_skip_reason}")
+        elif self.infrastructure_failure:
+            print("Phase 2 (Simulation): INFRASTRUCTURE FAILURE ⊘")
+            print(f"  Reason: {self.infrastructure_reason}")
+            if self.simulation_report:
+                precheck_report = self.simulation_report.get("precheck_report")
+                if precheck_report:
+                    print(
+                        f"  Precheck: {precheck_report.get('cycles_simulated', 0)} cycles, "
+                        f"{precheck_report.get('mismatch_count', 0)} mismatches, "
+                        f"{precheck_report.get('protocol_mismatch_count', 0)} protocol mismatches"
+                    )
         else:
             print("Phase 2 (Simulation): " + ("PASSED ✓" if self.phase2_passed else "FAILED ✗" if self.phase1_passed else "SKIPPED"))
             if self.simulation_report:
+                precheck_report = self.simulation_report.get("precheck_report")
+                if precheck_report:
+                    print(
+                        f"  Precheck: {precheck_report.get('cycles_simulated', 0)} cycles, "
+                        f"{precheck_report.get('mismatch_count', 0)} mismatches, "
+                        f"{precheck_report.get('protocol_mismatch_count', 0)} protocol mismatches"
+                    )
                 print(f"  Cycles: {self.simulation_report.get('cycles_simulated', 0)}")
                 print(f"  Mismatches: {self.simulation_report.get('mismatch_count', 0)}")
                 print(f"  Protocol mismatches: {self.simulation_report.get('protocol_mismatch_count', 0)}")
@@ -1577,6 +1870,8 @@ endmodule
         print()
         if self.phase2_skipped:
             overall_result = "PASSED ✓ (structural only)" if self.phase1_passed else "FAILED ✗"
+        elif self.infrastructure_failure:
+            overall_result = "INFRASTRUCTURE FAILURE ⊘"
         else:
             overall_result = "PASSED ✓" if (self.phase1_passed and self.phase2_passed) else "FAILED ✗"
         print(f"Overall Result: {overall_result}")
@@ -1588,10 +1883,14 @@ endmodule
             "golden_dcp": str(self.golden_dcp),
             "revised_dcp": str(self.revised_dcp),
             "num_vectors": self.num_vectors,
+            "precheck_vectors": self.precheck_vectors,
             "runtime_seconds": elapsed_time,
             "phase1_passed": self.phase1_passed,
             "phase2_passed": self.phase2_passed,
+            "infrastructure_failure": self.infrastructure_failure,
+            "infrastructure_reason": self.infrastructure_reason,
             "overall_passed": self.phase1_passed and self.phase2_passed,
+            "preflight_report": self.preflight_report,
             "structural_report": self.structural_report,
             "simulation_report": self.simulation_report
         }
@@ -1615,6 +1914,7 @@ async def main():
 Examples:
   python validate_dcps.py golden.dcp optimized.dcp
   python validate_dcps.py golden.dcp optimized.dcp --vectors 50000
+  python validate_dcps.py golden.dcp optimized.dcp --vectors 1000 --precheck-vectors 100
   python validate_dcps.py golden.dcp optimized.dcp --debug
         """
     )
@@ -1629,6 +1929,13 @@ Examples:
              "Larger benchmarks (e.g. corescore_500_mod) cost ~1s of xsim CPU "
              "per vector, so the default keeps wall-clock reasonable. Bump this "
              "up for higher-confidence runs."
+    )
+    parser.add_argument(
+        "--precheck-vectors",
+        type=int,
+        default=100,
+        help="Run this many vectors before the full simulation and skip the full "
+             "run if the precheck fails (default: 100, disabled if 0 or >= --vectors)."
     )
     parser.add_argument(
         "--debug",
@@ -1654,12 +1961,21 @@ Examples:
     
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.vectors <= 0:
+        print("Error: --vectors must be positive", file=sys.stderr)
+        sys.exit(1)
+
+    if args.precheck_vectors < 0:
+        print("Error: --precheck-vectors must be non-negative", file=sys.stderr)
+        sys.exit(1)
     
     # Run validation
     validator = DCPValidator(
         golden_dcp=args.golden_dcp,
         revised_dcp=args.revised_dcp,
         num_vectors=args.vectors,
+        precheck_vectors=args.precheck_vectors,
         debug=args.debug,
         no_reactive=args.no_reactive
     )
@@ -1668,6 +1984,8 @@ Examples:
         await validator.start_servers()
         success = await validator.validate()
         
+        if validator.infrastructure_failure:
+            sys.exit(2)
         sys.exit(0 if success else 1)
         
     except KeyboardInterrupt:
