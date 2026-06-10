@@ -133,15 +133,25 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
         and protocol_mismatch_count == 0
     )
 
-    infrastructure_failure = (
+    # A definitive logical FAIL (testbench mismatch) must never be promoted to
+    # an infrastructure failure. Otherwise a revised netlist that both mismatches
+    # and provokes a fatal-pattern xsim message would be tagged INFRASTRUCTURE
+    # FAILURE (exit 2 / retry) instead of a clean FAIL (exit 1 / score 0).
+    definitive_fail = (
+        result_fail_seen
+        or mismatch_count > 0
+        or protocol_mismatch_count > 0
+    )
+    infrastructure_failure = not definitive_fail and (
         simulator_failed
         or (not result_pass_seen and not result_fail_seen)
     )
     infrastructure_reason = None
-    if simulator_failed:
-        infrastructure_reason = "simulator_failed"
-    elif not result_pass_seen and not result_fail_seen:
-        infrastructure_reason = "testbench_completion_marker_missing"
+    if infrastructure_failure:
+        if simulator_failed:
+            infrastructure_reason = "simulator_failed"
+        elif not result_pass_seen and not result_fail_seen:
+            infrastructure_reason = "testbench_completion_marker_missing"
 
     return {
         "cycles_simulated": cycles_simulated,
