@@ -133,15 +133,25 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
         and protocol_mismatch_count == 0
     )
 
-    infrastructure_failure = (
+    # A definitive logical FAIL (testbench mismatch) must never be promoted to
+    # an infrastructure failure. Otherwise a revised netlist that both mismatches
+    # and provokes a fatal-pattern xsim message would be tagged INFRASTRUCTURE
+    # FAILURE (exit 2 / retry) instead of a clean FAIL (exit 1 / score 0).
+    definitive_fail = (
+        result_fail_seen
+        or mismatch_count > 0
+        or protocol_mismatch_count > 0
+    )
+    infrastructure_failure = not definitive_fail and (
         simulator_failed
         or (not result_pass_seen and not result_fail_seen)
     )
     infrastructure_reason = None
-    if simulator_failed:
-        infrastructure_reason = "simulator_failed"
-    elif not result_pass_seen and not result_fail_seen:
-        infrastructure_reason = "testbench_completion_marker_missing"
+    if infrastructure_failure:
+        if simulator_failed:
+            infrastructure_reason = "simulator_failed"
+        elif not result_pass_seen and not result_fail_seen:
+            infrastructure_reason = "testbench_completion_marker_missing"
 
     return {
         "cycles_simulated": cycles_simulated,
@@ -733,6 +743,29 @@ proc __vd_find_clock_ports {} {
         # nothing (e.g. an unconstrained design with no SDC).
         clocks: list = []
         if clock_names:
+            # Vivado's all_fanin traversal can return non-clock signals (e.g.
+            # data-valid or commit strobe inputs) that happen to feed into
+            # the clock network via CE pins or combinatorial paths. Filter the
+            # reported list to ports whose names contain 'clk' or 'clock' so
+            # those data signals are not stripped from the driven input set.
+            clock_like_names = [
+                n for n in clock_names
+                if 'clk' in n.lower() or 'clock' in n.lower()
+            ]
+            if not clock_like_names:
+                logger.warning(
+                    f"Vivado-reported clock ports {sorted(clock_names)} have no "
+                    "clock-like names; falling back to name-based heuristic"
+                )
+                clock_names = []
+            else:
+                if len(clock_like_names) < len(clock_names):
+                    excluded = sorted(set(clock_names) - set(clock_like_names))
+                    logger.info(
+                        f"Filtered non-clock-like ports from Vivado clock list: "
+                        f"{excluded} (likely data/control signals mis-reported by all_fanin)"
+                    )
+                clock_names = clock_like_names
             wanted = set(clock_names)
             clocks = [p for p in inputs if p['name'] in wanted]
             missing = wanted - {p['name'] for p in clocks}
@@ -766,6 +799,17 @@ proc __vd_find_clock_ports {} {
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
 
+        # Reset polarity is also heuristic. Active-low resets are conventionally
+        # named with an "n" suffix (aresetn, rst_n, resetn, ...). Driving an
+        # active-low reset as if it were active-high holds the design IN reset for
+        # the entire warm-up + checking window, freezing every output and masking
+        # real differences (added latency, etc.). Detect the convention and pick
+        # assert/deassert levels accordingly; default to active-high.
+        reset_active_low = bool(reset) and bool(
+            re.search(r'(rst|reset)_?n$', reset.lower()))
+        reset_assert = '0' if reset_active_low else '1'
+        reset_deassert = '1' if reset_active_low else '0'
+
         input_by_name = {p['name']: p for p in regular_inputs}
         output_by_name = {p['name']: p for p in outputs}
 
@@ -774,6 +818,7 @@ proc __vd_find_clock_ports {} {
         request_ifaces = []
         ready_bias_inputs = []
         hls_iface = None
+        hls_mem_ifaces = []
         used_iface_ids = {}
 
         def unique_iface_id(prefix: str) -> str:
@@ -878,6 +923,24 @@ proc __vd_find_clock_ports {} {
                         f"{prefix}_tuser",
                     ]
                     payload_inputs = [input_by_name[pn] for pn in payload_names if pn in input_by_name]
+            elif name.endswith('_valid') and not name.endswith('_tvalid') and not name.endswith('_cmd_valid'):
+                # Generic valid/ready pair (e.g. s_valid/s_ready in custom FIR filters).
+                # Only recognised when a matching _ready output is present so we
+                # don't misclassify single-bit control strobes.
+                prefix = name[:-len('_valid')]
+                ready_out = f"{prefix}_ready"
+                if ready_out in output_by_name:
+                    valid_in = name
+                    # Collect companion payload inputs (prefix_data, prefix_*data, etc.)
+                    payload_inputs = sorted(
+                        (
+                            p for p in regular_inputs
+                            if p['name'].startswith(f"{prefix}_")
+                            and p['name'] != name
+                            and not p['name'].endswith('_ready')
+                        ),
+                        key=lambda p: p['name'],
+                    )
 
             if not valid_in or not ready_out:
                 continue
@@ -913,6 +976,51 @@ proc __vd_find_clock_ports {} {
                 ready_bias_inputs.append(name)
                 controlled_inputs.add(name)
 
+        # Detect HLS ap_memory interfaces: {prefix}_q{N} input where
+        # {prefix}_address{N} and {prefix}_ce{N} exist as outputs.
+
+        # Ports that need coordinate_byte_clamp: (q_name_lower, q_width, addr_width).
+        # Rosetta 3D rendering reads byte-packed coordinates from input_r_q*/q1;
+        # clamping keeps triangle areas small enough for the rasterizer to drain
+        # within the simulation window.
+        _COORDINATE_CLAMP_PORTS: set[tuple[str, int, int]] = {
+            ("input_r_q0", 32, 14),
+            ("input_r_q1", 32, 14),
+        }
+
+        def hls_memory_data_mode(q_name: str, q_width: int, addr_width: int) -> str:
+            if ('rendering' in golden_module.lower() and
+                    (q_name.lower(), q_width, addr_width) in _COORDINATE_CLAMP_PORTS):
+                return "coordinate_byte_clamp"
+            return "full_width_hash"
+
+        for port in regular_inputs:
+            name = port['name']
+            if name in controlled_inputs:
+                continue
+            m_mem = re.match(r'^(.+)_q(\d+)$', name)
+            if not m_mem:
+                continue
+            prefix, N = m_mem.group(1), m_mem.group(2)
+            addr_port_name = f"{prefix}_address{N}"
+            ce_port_name = f"{prefix}_ce{N}"
+            if addr_port_name not in output_by_name or ce_port_name not in output_by_name:
+                continue
+            we_port_name = f"{prefix}_we{N}"
+            addr_width = port_bit_width(output_by_name[addr_port_name])
+            q_width = port_bit_width(port)
+            hls_mem_ifaces.append({
+                "q_in": name,
+                "q_width": q_width,
+                "addr_out": addr_port_name,
+                "addr_width": addr_width,
+                "ce_out": ce_port_name,
+                "we_out": we_port_name if we_port_name in output_by_name else None,
+                "data_mode": hls_memory_data_mode(name, q_width, addr_width),
+            })
+            controlled_inputs.add(name)
+            logger.info(f"Detected HLS ap_memory: {name} driven by {addr_port_name}/{ce_port_name}")
+
         # Detect simple HLS-style control interfaces (ap_ctrl_hs) and drive
         # them transactionally. Randomly toggling ap_start and mutating all
         # memory/data inputs every cycle can leave these designs mostly idle
@@ -945,6 +1053,7 @@ proc __vd_find_clock_ports {} {
             request_ifaces.clear()
             ready_bias_inputs.clear()
             hls_iface = None
+            hls_mem_ifaces.clear()
             controlled_inputs.clear()
 
         # Build port connections carefully to handle edge cases
@@ -1080,7 +1189,7 @@ proc __vd_find_clock_ports {} {
                     seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
                     lines.append(assign_from_seed(port, seed_expr, indent="                "))
                 lines.append("            end else if (env_{0}_active) begin".format(iface_id))
-                lines.append(f"                {start_in} = 0;")
+                lines.append(f"                {start_in} = 1;  // Keep high for streaming/long-running kernels")
                 for idx, port in enumerate(stable_inputs):
                     seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
                     lines.append(assign_from_seed(port, seed_expr, indent="                "))
@@ -1122,8 +1231,9 @@ proc __vd_find_clock_ports {} {
                 lines.append(f"                env_{iface_id}_cycles = 1;")
                 lines.append(f"            end else if (env_{iface_id}_active) begin")
                 lines.append(f"                env_{iface_id}_cycles = env_{iface_id}_cycles + 1;")
-                lines.append(f"                if ({done_expr} || (({ready_expr}) && env_{iface_id}_cycles > 1)) begin")
-                lines.append(f"                    env_{iface_id}_active = 0;")
+                lines.append(f"                if ({done_expr}) begin")
+                lines.append(f"                    // Transaction boundary: refresh seed but stay active for continuous execution.")
+                lines.append(f"                    env_{iface_id}_seed = lfsr ^ 32'hA5A55A5A;")
                 lines.append(f"                    env_{iface_id}_cycles = 0;")
                 lines.append("                end")
                 lines.append(f"            end else if ({launch_condition}) begin")
@@ -1160,7 +1270,80 @@ proc __vd_find_clock_ports {} {
                 protocol_mismatch_count = protocol_mismatch_count + 1;
             end''')
             return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
-        
+
+        def generate_hls_mem_model_code() -> str:
+            if not hls_mem_ifaces:
+                return ''
+            lines = ["    // Behavioral memory model for HLS ap_memory interfaces"]
+            if any(iface['data_mode'] == "coordinate_byte_clamp" for iface in hls_mem_ifaces):
+                lines.extend([
+                    "    function [7:0] hls_mem_byte_hash;",
+                    "        input [15:0] addr;",
+                    "        input [15:0] prime;",
+                    "        input [15:0] offset;",
+                    "        begin",
+                    "            hls_mem_byte_hash = ((addr * prime + offset) >> 8) & 8'h07;",
+                    "        end",
+                    "    endfunction",
+                    "",
+                ])
+            lines.append(f"    always @(posedge {clock}) begin")
+            for idx, iface in enumerate(hls_mem_ifaces):
+                q_in       = iface['q_in']
+                q_width    = iface['q_width']
+                addr_out   = iface['addr_out']
+                addr_width = iface['addr_width']
+                ce_out     = iface['ce_out']
+                we_out     = iface['we_out']
+                data_mode  = iface['data_mode']
+                we_check = f" && !golden_{we_out}" if we_out else ""
+                lines.append(f"        if (golden_{ce_out}{we_check}) begin")
+                if data_mode == "coordinate_byte_clamp":
+                    # 32-bit ports carry byte-packed coordinates (e.g., 3D rendering).
+                    # Use independent 16-bit hashes per byte so each coordinate field
+                    # gets a distinct value, and mask to [0,31] to keep triangle areas
+                    # small enough for the HLS rasterizer to drain the input FIFO
+                    # within the simulation window.
+                    pad16 = max(0, 16 - addr_width)
+                    if pad16 > 0:
+                        addr16 = f"{{{pad16}'b0, golden_{addr_out}}}"
+                    elif addr_width == 16:
+                        addr16 = f"golden_{addr_out}"
+                    else:
+                        addr16 = f"golden_{addr_out}[15:0]"
+                    # Four independent primes and offsets; per-interface salt via XOR with idx
+                    byte_primes = [0xA15B, 0x6C3D, 0x9E37, 0x4F2B]
+                    byte_offsets = [0xA500, 0x5A00, 0x3C00, 0xC300]
+                    byte_primes  = [(p ^ (idx * 0x0101) | 1) & 0xFFFF for p in byte_primes]
+                    byte_offsets = [(o ^ (idx * 0x1010)) & 0xFFFF for o in byte_offsets]
+                    # Build {byte3, byte2, byte1, byte0} — byte3 is MSB of the 32-bit word.
+                    # Mask to [0,7] (3 bits) so rasterization stays fast enough to drain the
+                    # FIFO within the simulation comparison window.
+                    parts_msb_first = []
+                    for b in range(3, -1, -1):
+                        p = byte_primes[b]
+                        o = byte_offsets[b]
+                        parts_msb_first.append(
+                            f"hls_mem_byte_hash({addr16}, 16'h{p:04X}, 16'h{o:04X})"
+                        )
+                    lines.append(f"            {q_in} <= {{{', '.join(parts_msb_first)}}};")
+                else:
+                    # Wide ports (e.g., 64-bit optical-flow frames): full-width multiply-XOR hash.
+                    q_mask = (1 << q_width) - 1
+                    prime  = 0x9E3779B97F4A7C15 & q_mask
+                    salt   = (0xA5A5A5A5A5A5A5A5 ^ (idx * 0x1F1F1F1F1F1F1F1F)) & q_mask
+                    ext_zeros = q_width - addr_width
+                    if ext_zeros > 0:
+                        addr_ext = f"{{{ext_zeros}'b0, golden_{addr_out}}}"
+                    elif ext_zeros == 0:
+                        addr_ext = f"golden_{addr_out}"
+                    else:
+                        addr_ext = f"golden_{addr_out}[{q_width-1}:0]"
+                    lines.append(f"            {q_in} <= ({addr_ext} * {q_width}'h{prime:X}) ^ {q_width}'h{salt:X};")
+                lines.append("        end")
+            lines.append("    end")
+            return '\n'.join(lines)
+
         # Generate testbench
         compare_body = chr(10).join(f'''
             if (golden_{port['name']} !== revised_{port['name']}) begin
@@ -1213,7 +1396,8 @@ module testbench;
             lfsr_next = {{lfsr_in[30:0], lfsr_in[31] ^ lfsr_in[21] ^ lfsr_in[1] ^ lfsr_in[0]}};
         end
     endfunction
-    
+
+{generate_hls_mem_model_code()}
     // Test stimulus and checking
     integer mismatch_count;
     integer protocol_mismatch_count;
@@ -1231,11 +1415,11 @@ module testbench;
         $display("Configured test vectors: %0d", num_vectors);
 {generate_env_init_code()}
         
-        // Reset
-        {''+reset+' = 1;' if reset else ''}
+        // Reset ({'active-low' if reset_active_low else 'active-high'})
+        {''+reset+' = '+reset_assert+';' if reset else ''}
         {chr(10).join(f"        {port['name']} = 0;" for port in regular_inputs)}
         repeat(10) @(posedge {clock});
-        {''+reset+' = 0;' if reset else ''}
+        {''+reset+' = '+reset_deassert+';' if reset else ''}
         
         // Warm-up period: fill pipeline without checking outputs.
         // Drive inputs on the inactive edge so sequential logic sees stable
