@@ -174,7 +174,7 @@ class DCPValidator:
         self,
         golden_dcp: Path,
         revised_dcp: Path,
-        num_vectors: int = 200,
+        num_vectors: int = 1000,
         precheck_vectors: int = 100,
         debug: bool = False,
         no_reactive: bool = False,
@@ -787,7 +787,9 @@ proc __vd_find_clock_ports {} {
         
         # Reset detection remains heuristic - DCPs do not carry a canonical
         # "this port is the reset" property the way they do for clocks.
-        resets = [p for p in inputs if 'rst' in p['name'].lower() or 'reset' in p['name'].lower()]
+        resets = [p for p in inputs
+                  if ('rst' in p['name'].lower() or 'reset' in p['name'].lower())
+                  and port_bit_width(p) == 1]
         
         if not clocks:
             raise ValueError("No clock signal found in design")
@@ -809,6 +811,18 @@ proc __vd_find_clock_ports {} {
             re.search(r'(rst|reset)_?n$', reset.lower()))
         reset_assert = '0' if reset_active_low else '1'
         reset_deassert = '1' if reset_active_low else '0'
+
+        # Designs may expose multiple reset-related ports (e.g. VexRiscv has
+        # both 'debugReset' and 'reset'). Build assertion/de-assertion lines
+        # for ALL of them so the CPU is not left with a floating CLR input.
+        def _reset_level(name: str) -> tuple:
+            al = bool(re.search(r'(rst|reset)_?n$', name.lower()))
+            return ('0' if al else '1', '1' if al else '0')
+
+        all_reset_assert_lines   = '\n'.join(
+            f"        {r['name']} = {_reset_level(r['name'])[0]};" for r in resets)
+        all_reset_deassert_lines = '\n'.join(
+            f"        {r['name']} = {_reset_level(r['name'])[1]};" for r in resets)
 
         input_by_name = {p['name']: p for p in regular_inputs}
         output_by_name = {p['name']: p for p in outputs}
@@ -1056,15 +1070,91 @@ proc __vd_find_clock_ports {} {
             hls_mem_ifaces.clear()
             controlled_inputs.clear()
 
+        # Detect CPU-specific features from the golden Verilog netlist. Both
+        # VexRiscv and BoomSoC detection read the text once and share it.
+        golden_v_text = None
+        icache_bootstrap = None
+        tilelink_boom = False
+        if golden_info.get('verilog_path') and not self.no_reactive:
+            try:
+                golden_v_text = Path(golden_info['verilog_path']).read_text(errors='replace')
+                icache_bootstrap = self._detect_icache_bootstrap(golden_v_text)
+                if icache_bootstrap:
+                    logger.info(
+                        "VexRiscv InstructionCache detected — enabling 8-word burst "
+                        "iBus bootstrap and DSP multiply stimulus"
+                    )
+                tilelink_boom = self._detect_tilelink_boom(golden_v_text)
+                if tilelink_boom:
+                    logger.info("BoomSoC TileLink detected — enabling 64-bit DSP multiply stimulus")
+            except OSError:
+                pass
+
+        dsp_cpu_iface = None
+        if not self.no_reactive:
+            # iBus-style (VexRiscv)
+            if icache_bootstrap:
+                _ibus_candidates = []
+                for iface in response_ifaces:
+                    data_payloads = [p for p in iface['payload_inputs']
+                                     if not p['name'].endswith(('_error', '_last'))]
+                    if data_payloads and port_bit_width(data_payloads[0]) == 32:
+                        _ibus_candidates.append((iface, data_payloads[0]))
+                if _ibus_candidates:
+                    _best = next(
+                        (c for c in _ibus_candidates
+                         if 'ibus' in c[0].get('prefix', c[0]['id']).lower()),
+                        _ibus_candidates[0]
+                    )
+                    dsp_cpu_iface = {'type': 'ibus', 'iface': _best[0],
+                                     'data_port': _best[1]}
+            # TileLink-style (BoomSoC)
+            if dsp_cpu_iface is None and tilelink_boom:
+                for iface in request_ifaces:
+                    data_p = next((p for p in iface['payload_inputs']
+                                   if 'd_bits_data' in p['name']
+                                   and port_bit_width(p) == 64), None)
+                    if data_p:
+                        pfx = iface['prefix']
+                        a_pfx = (pfx[:-2] + '_a') if pfx.endswith('_d') else pfx
+                        a_src_key  = f"{a_pfx}_bits_source"
+                        a_size_key = f"{a_pfx}_bits_size"
+                        if a_src_key not in output_by_name:
+                            logger.warning(
+                                f"TileLink A-channel field {a_src_key!r} not found in "
+                                f"DUT outputs — source echo will be driven as 0"
+                            )
+                        if a_size_key not in output_by_name:
+                            logger.warning(
+                                f"TileLink A-channel field {a_size_key!r} not found in "
+                                f"DUT outputs — size echo will be driven as 0"
+                            )
+                        dsp_cpu_iface = {
+                            'type': 'tilelink',
+                            'iface': iface,
+                            'data_port': data_p,
+                            'source_port': next((p for p in iface['payload_inputs']
+                                                 if p['name'].endswith('_source')), None),
+                            'size_port':   next((p for p in iface['payload_inputs']
+                                                 if p['name'].endswith('_size')), None),
+                            'opcode_port': next((p for p in iface['payload_inputs']
+                                                 if p['name'].endswith('_opcode')), None),
+                            'a_source_out': f"golden_{a_src_key}"  if a_src_key  in output_by_name else None,
+                            'a_size_out':   f"golden_{a_size_key}" if a_size_key in output_by_name else None,
+                        }
+                        break
+            if dsp_cpu_iface:
+                logger.info(f"DSP stimulus mode active ({dsp_cpu_iface['type']})")
+
         # Build port connections carefully to handle edge cases
         def build_port_connections(module_suffix=""):
             """Build port connection string for module instantiation."""
             connections = []
             # Clock
             connections.append(f".{clock}({clock})")
-            # Reset if present
-            if reset:
-                connections.append(f".{reset}({reset})")
+            # All reset ports
+            for r in resets:
+                connections.append(f".{r['name']}({r['name']})")
             # Regular inputs
             for port in regular_inputs:
                 connections.append(f".{port['name']}({port['name']})")
@@ -1095,30 +1185,55 @@ proc __vd_find_clock_ports {} {
             decls = []
             for iface in response_ifaces:
                 iface_id = iface['id']
+                is_ibus_burst = (icache_bootstrap and dsp_cpu_iface
+                                 and dsp_cpu_iface['type'] == 'ibus'
+                                 and dsp_cpu_iface['iface']['id'] == iface_id)
                 decls.append(f"    reg env_{iface_id}_pending;")
                 decls.append(f"    integer env_{iface_id}_delay;")
                 decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+                if is_ibus_burst:
+                    decls.append(f"    integer env_{iface_id}_burst_remaining;")
             if hls_iface:
                 iface_id = hls_iface['id']
                 decls.append(f"    reg env_{iface_id}_active;")
                 decls.append(f"    reg env_{iface_id}_launch;")
                 decls.append(f"    integer env_{iface_id}_cycles;")
                 decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+            if dsp_cpu_iface:
+                decls += [
+                    "    // DSP RV32M injection state machine",
+                    "    reg [2:0]  dsp_inj_state;",
+                    "    reg [4:0]  dsp_inj_rd1, dsp_inj_rd2, dsp_inj_rd3;",
+                    "    reg [11:0] dsp_inj_imm1, dsp_inj_imm2;",
+                    "    reg        dsp_inj_fire;",
+                ]
             return '\n'.join(decls) if decls else '    // No reactive environment state'
 
         def generate_env_init_code() -> str:
             lines = []
             for iface in response_ifaces:
                 iface_id = iface['id']
+                is_ibus_burst = (icache_bootstrap and dsp_cpu_iface
+                                 and dsp_cpu_iface['type'] == 'ibus'
+                                 and dsp_cpu_iface['iface']['id'] == iface_id)
                 lines.append(f"        env_{iface_id}_pending = 0;")
                 lines.append(f"        env_{iface_id}_delay = 0;")
                 lines.append(f"        env_{iface_id}_seed = 32'h{(0x13579BDF ^ (len(iface_id) * 0x1021)) & 0xFFFFFFFF:08X};")
+                if is_ibus_burst:
+                    lines.append(f"        env_{iface_id}_burst_remaining = 0;")
             if hls_iface:
                 iface_id = hls_iface['id']
                 lines.append(f"        env_{iface_id}_active = 0;")
                 lines.append(f"        env_{iface_id}_launch = 0;")
                 lines.append(f"        env_{iface_id}_cycles = 0;")
                 lines.append(f"        env_{iface_id}_seed = 32'h2468ACE1;")
+            if dsp_cpu_iface:
+                lines += [
+                    "        dsp_inj_fire = 1'b0;",
+                    "        dsp_inj_state = 3'd0;",
+                    "        dsp_inj_rd1 = 5'd1; dsp_inj_rd2 = 5'd2; dsp_inj_rd3 = 5'd3;",
+                    "        dsp_inj_imm1 = 12'd0; dsp_inj_imm2 = 12'd0;",
+                ]
             return '\n'.join(lines) if lines else '        // No reactive environment state to initialize'
 
         def generate_negedge_stimulus_code() -> str:
@@ -1137,7 +1252,15 @@ proc __vd_find_clock_ports {} {
                     lines.append(f"                {ready_in} = 1;")
                     lines.append("            end")
 
-                lines.append(f"            if (env_{iface_id}_pending && env_{iface_id}_delay == 0) begin")
+                is_dsp_ibus = (dsp_cpu_iface and dsp_cpu_iface['type'] == 'ibus'
+                               and dsp_cpu_iface['iface']['id'] == iface_id)
+                is_ibus_burst = is_dsp_ibus and icache_bootstrap
+                if is_ibus_burst:
+                    active_cond = (f"env_{iface_id}_pending && env_{iface_id}_delay == 0 "
+                                   f"&& env_{iface_id}_burst_remaining > 0")
+                else:
+                    active_cond = f"env_{iface_id}_pending && env_{iface_id}_delay == 0"
+                lines.append(f"            if ({active_cond}) begin")
                 lines.append(f"                {rsp_valid_in} = 1;")
                 for payload in iface['payload_inputs']:
                     payload_name = payload['name']
@@ -1145,6 +1268,12 @@ proc __vd_find_clock_ports {} {
                         lines.append(f"                {payload_name} = 0;")
                     elif payload_name.endswith('_last'):
                         lines.append(f"                {payload_name} = 1;")
+                    elif is_dsp_ibus and payload_name == dsp_cpu_iface['data_port']['name']:
+                        lines.append(
+                            f"                {payload_name} = "
+                            f"dsp_rv32_instr(dsp_inj_state, dsp_inj_rd1, dsp_inj_rd2, "
+                            f"dsp_inj_rd3, dsp_inj_imm1, dsp_inj_imm2);"
+                        )
                     else:
                         lines.append(assign_from_seed(payload, f"env_{iface_id}_seed", indent="                "))
                 lines.append("            end else begin")
@@ -1156,20 +1285,46 @@ proc __vd_find_clock_ports {} {
 
             for iface in request_ifaces:
                 ready_expr = f"golden_{iface['ready_out']}"
+                is_dsp_tl = (dsp_cpu_iface and dsp_cpu_iface['type'] == 'tilelink'
+                             and dsp_cpu_iface['iface']['id'] == iface['id'])
                 lines.append(f"            // Reactive request driver for {iface['prefix']}")
                 lines.append(f"            if ({ready_expr}) begin")
                 lines.append(f"                {iface['valid_in']} = 1;")
                 for payload in iface['payload_inputs']:
                     payload_name = payload['name']
-                    if payload_name.endswith('_last'):
+                    if is_dsp_tl:
+                        dp = dsp_cpu_iface
+                        if payload_name == dp['data_port']['name']:
+                            next_st = "(dsp_inj_state == 3'd7) ? 3'd0 : dsp_inj_state + 3'd1"
+                            lines.append(
+                                f"                {payload_name} = (dsp_inj_state != 3'd0) ? "
+                                f"{{dsp_rv32_instr({next_st}, dsp_inj_rd1, dsp_inj_rd2, dsp_inj_rd3, dsp_inj_imm1, dsp_inj_imm2), "
+                                f"dsp_rv32_instr(dsp_inj_state, dsp_inj_rd1, dsp_inj_rd2, dsp_inj_rd3, dsp_inj_imm1, dsp_inj_imm2)}} "
+                                f": {{lfsr ^ 32'h9E3779B9, lfsr}};"
+                            )
+                        elif dp.get('source_port') and payload_name == dp['source_port']['name']:
+                            src = dp['a_source_out'] if dp['a_source_out'] is not None else "0"
+                            lines.append(f"                {payload_name} = {src};")
+                        elif dp.get('size_port') and payload_name == dp['size_port']['name']:
+                            sz = dp['a_size_out'] if dp['a_size_out'] is not None else "0"
+                            lines.append(f"                {payload_name} = {sz};")
+                        elif dp.get('opcode_port') and payload_name == dp['opcode_port']['name']:
+                            lines.append(f"                {payload_name} = 3'd1;")
+                        else:
+                            lines.append(f"                {payload_name} = 0;")
+                    elif payload_name.endswith('_last'):
                         lines.append(f"                {payload_name} = 1;")
                     else:
                         lines.append(assign_from_seed(payload, "lfsr", indent="                "))
                 lines.append("            end else begin")
-                lines.append(f"                {iface['valid_in']} = lfsr[0];")
+                # DSP TileLink: hold valid low when DUT is not ready so payload
+                # remains stable across the handshake (valid/ready protocol).
+                lines.append(f"                {iface['valid_in']} = {'0' if is_dsp_tl else 'lfsr[0]'};")
                 for payload in iface['payload_inputs']:
                     payload_name = payload['name']
-                    if payload_name.endswith('_last'):
+                    if is_dsp_tl:
+                        lines.append(f"                {payload_name} = 0;")
+                    elif payload_name.endswith('_last'):
                         lines.append(f"                {payload_name} = 0;")
                     else:
                         lines.append(assign_from_seed(payload, "lfsr", indent="                "))
@@ -1204,21 +1359,60 @@ proc __vd_find_clock_ports {} {
 
         def generate_posedge_bookkeeping_code() -> str:
             lines = []
+            # Capture DSP fire condition BEFORE pending flags are cleared by the
+            # management loop below (blocking assignments would otherwise make
+            # env_*_pending == 0 by the time the state machine checks it).
+            if dsp_cpu_iface and dsp_cpu_iface['type'] == 'ibus':
+                iid = dsp_cpu_iface['iface']['id']
+                if icache_bootstrap:
+                    lines.append(
+                        f"            dsp_inj_fire = env_{iid}_pending && env_{iid}_delay == 0 "
+                        f"&& env_{iid}_burst_remaining > 0;"
+                    )
+                else:
+                    lines.append(
+                        f"            dsp_inj_fire = env_{iid}_pending && env_{iid}_delay == 0;"
+                    )
+            elif dsp_cpu_iface and dsp_cpu_iface['type'] == 'tilelink':
+                d_ready = f"golden_{dsp_cpu_iface['iface']['prefix']}_ready"
+                lines.append(
+                    f"            dsp_inj_fire = {dsp_cpu_iface['iface']['valid_in']} && {d_ready};"
+                )
             for idx, iface in enumerate(response_ifaces):
                 iface_id = iface['id']
                 cmd_valid_out = f"golden_{iface['cmd_valid_out']}"
                 ready_gate = iface['ready_in'] if iface['ready_in'] else "1'b1"
                 seed_mask = (0x9E3779B9 ^ (idx * 0x45D9F3B)) & 0xFFFFFFFF
+                is_ibus_burst = (icache_bootstrap and dsp_cpu_iface
+                                 and dsp_cpu_iface['type'] == 'ibus'
+                                 and dsp_cpu_iface['iface']['id'] == iface_id)
                 lines.append(f"            if (env_{iface_id}_pending) begin")
                 lines.append(f"                if (env_{iface_id}_delay > 0) begin")
                 lines.append(f"                    env_{iface_id}_delay = env_{iface_id}_delay - 1;")
-                lines.append("                end else begin")
-                lines.append(f"                    env_{iface_id}_pending = 0;")
+                if is_ibus_burst:
+                    # Burst mode: deliver one word per cycle; clear pending when all 8 are done
+                    lines.append(f"                end else if (env_{iface_id}_burst_remaining > 0) begin")
+                    lines.append(f"                    env_{iface_id}_burst_remaining = env_{iface_id}_burst_remaining - 1;")
+                    lines.append(f"                    if (env_{iface_id}_burst_remaining == 0) begin")
+                    lines.append(f"                        env_{iface_id}_pending = 0;")
+                    lines.append(f"                    end")
+                else:
+                    lines.append("                end else begin")
+                    lines.append(f"                    env_{iface_id}_pending = 0;")
                 lines.append("                end")
                 lines.append(f"            end else if ({cmd_valid_out} && {ready_gate}) begin")
                 lines.append(f"                env_{iface_id}_pending = 1;")
                 lines.append(f"                env_{iface_id}_delay = lfsr[0];")
                 lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'h{seed_mask:08X};")
+                if is_ibus_burst:
+                    lines.append(f"                env_{iface_id}_burst_remaining = 8;")
+                    # Pre-arm DSP injection state so first rsp word carries state=1 (ADDI)
+                    lines.append(f"                dsp_inj_state <= 3'd1;")
+                    lines.append(f"                dsp_inj_rd1  <= (lfsr[5:1]   == 5'd0) ? 5'd1 : lfsr[5:1];")
+                    lines.append(f"                dsp_inj_rd2  <= (lfsr[10:6]  == 5'd0) ? 5'd2 : lfsr[10:6];")
+                    lines.append(f"                dsp_inj_rd3  <= (lfsr[15:11] == 5'd0) ? 5'd3 : lfsr[15:11];")
+                    lines.append(f"                dsp_inj_imm1 <= 12'd7;")
+                    lines.append(f"                dsp_inj_imm2 <= 12'd11;")
                 lines.append("            end")
             if hls_iface:
                 iface_id = hls_iface['id']
@@ -1242,6 +1436,31 @@ proc __vd_find_clock_ports {} {
                 lines.append(f"                env_{iface_id}_cycles = 0;")
                 lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'hA5A55A5A;")
                 lines.append("            end")
+            if dsp_cpu_iface:
+                if icache_bootstrap:
+                    # Burst mode: state machine is pre-armed at cmd-fire; just advance per word.
+                    lines += [
+                        "            // DSP RV32M injection state machine (burst mode: pre-armed at cmd-fire)",
+                        "            if (dsp_inj_state != 3'd0 && dsp_inj_fire) begin",
+                        "                dsp_inj_state <= (dsp_inj_state == 3'd7) ? 3'd0 : dsp_inj_state + 3'd1;",
+                        "            end",
+                    ]
+                else:
+                    lines += [
+                        "            // DSP RV32M injection state machine",
+                        "            if (dsp_inj_state == 3'd0) begin",
+                        "                if (dsp_inj_fire && lfsr[0]) begin",
+                        "                    dsp_inj_state <= 3'd1;",
+                        "                    dsp_inj_rd1  <= (lfsr[5:1]   == 5'd0) ? 5'd1 : lfsr[5:1];",
+                        "                    dsp_inj_rd2  <= (lfsr[10:6]  == 5'd0) ? 5'd2 : lfsr[10:6];",
+                        "                    dsp_inj_rd3  <= (lfsr[15:11] == 5'd0) ? 5'd3 : lfsr[15:11];",
+                        "                    dsp_inj_imm1 <= 12'd7;",
+                        "                    dsp_inj_imm2 <= 12'd11;",
+                        "                end",
+                        "            end else if (dsp_inj_fire) begin",
+                        "                dsp_inj_state <= (dsp_inj_state == 3'd7) ? 3'd0 : dsp_inj_state + 3'd1;",
+                        "            end",
+                    ]
             return '\n'.join(lines) if lines else '            // No reactive bookkeeping required'
 
         def generate_protocol_compare_code() -> str:
@@ -1351,6 +1570,37 @@ proc __vd_find_clock_ports {} {
                 mismatch_count = mismatch_count + 1;
             end''' for port in outputs) if outputs else '            // No outputs to compare'
 
+        if dsp_cpu_iface:
+            dsp_instr_fn = """
+    // RV32M multiply-sequence instruction encoder used by DSP injection stimulus.
+    function [31:0] dsp_rv32_instr;
+        input [2:0]  state;
+        input [4:0]  rd1, rd2, rd3;
+        input [11:0] imm1, imm2;
+        begin
+            case (state)
+                3'd1: dsp_rv32_instr = {imm1, 5'd0, 3'd0, rd1, 7'b0010011}; // ADDI rd1,x0,imm1
+                3'd2: dsp_rv32_instr = 32'h00000013;                          // NOP
+                3'd3: dsp_rv32_instr = {imm2, 5'd0, 3'd0, rd2, 7'b0010011}; // ADDI rd2,x0,imm2
+                3'd4: dsp_rv32_instr = 32'h00000013;                          // NOP
+                3'd5: dsp_rv32_instr = {7'b0000001, rd2, rd1, 3'd0, rd3, 7'b0110011}; // MUL rd3,rd1,rd2
+                3'd6: dsp_rv32_instr = 32'h00000013;                          // NOP
+                3'd7: dsp_rv32_instr = {7'b0000010, 5'd0, rd3, 3'b001, 5'b00000, 7'b1100011}; // BNE rd3,x0,+64
+                default: dsp_rv32_instr = 32'h00000013;                          // NOP (state 0 = idle)
+            endcase
+        end
+    endfunction
+"""
+        else:
+            dsp_instr_fn = ""
+
+        # No force block needed: the VexRiscv naturally boots after the icache
+        # flush completes (~256 cycles post-reset), at which point lineLoader_valid
+        # fires naturally without any external forcing.  Forcing lineLoader_valid
+        # early (before flush completes) corrupts the tag state and blocks the
+        # natural boot.
+        icache_force_block = ""
+
         tb_content = f"""
 `timescale 1ns / 1ps
 
@@ -1358,37 +1608,37 @@ module testbench;
 
     // Clock and reset
     reg {clock};
-    {'reg ' + reset + ';' if reset else ''}
-    
+    {chr(10).join(f"    reg {r['name']};" for r in resets) if resets else '    // no reset port detected'}
+
     // Inputs (driven by LFSR)
     {chr(10).join(f"    reg {port['width']+' ' if port['width'] else ''}{port['name']};" for port in regular_inputs) if regular_inputs else '    // No regular inputs'}
-    
+
     // Outputs from both designs
     {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}golden_{port['name']};" for port in outputs) if outputs else '    // No outputs to compare'}
     {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}revised_{port['name']};" for port in outputs) if outputs else ''}
-    
+
     // LFSR for pseudo-random input generation
     reg [31:0] lfsr = 32'hDEADBEEF;
-    
+
     // Reactive environment state
 {generate_env_declarations()}
-    
+
     // Instantiate golden design
     {golden_module} golden_dut (
         {build_port_connections("golden_")}
     );
-    
+
     // Instantiate revised design
     {revised_module} revised_dut (
         {build_port_connections("revised_")}
     );
-    
+
     // Clock generation (10ns period = 100MHz)
     initial begin
         {clock} = 0;
         forever #5 {clock} = ~{clock};
     end
-    
+
     // LFSR update function
     function [31:0] lfsr_next;
         input [31:0] lfsr_in;
@@ -1396,14 +1646,14 @@ module testbench;
             lfsr_next = {{lfsr_in[30:0], lfsr_in[31] ^ lfsr_in[21] ^ lfsr_in[1] ^ lfsr_in[0]}};
         end
     endfunction
-
+{dsp_instr_fn}
 {generate_hls_mem_model_code()}
     // Test stimulus and checking
     integer mismatch_count;
     integer protocol_mismatch_count;
     integer cycle_count;
     integer num_vectors;
-    
+
     initial begin
         mismatch_count = 0;
         protocol_mismatch_count = 0;
@@ -1414,13 +1664,13 @@ module testbench;
         end
         $display("Configured test vectors: %0d", num_vectors);
 {generate_env_init_code()}
-        
-        // Reset ({'active-low' if reset_active_low else 'active-high'})
-        {''+reset+' = '+reset_assert+';' if reset else ''}
+
+        // Reset (all reset-like ports driven together)
+        {all_reset_assert_lines if resets else '// no reset port detected'}
         {chr(10).join(f"        {port['name']} = 0;" for port in regular_inputs)}
         repeat(10) @(posedge {clock});
-        {''+reset+' = '+reset_deassert+';' if reset else ''}
-        
+        {all_reset_deassert_lines if resets else ''}
+
         // Warm-up period: fill pipeline without checking outputs.
         // Drive inputs on the inactive edge so sequential logic sees stable
         // values before the active clock edge.
@@ -1433,7 +1683,7 @@ module testbench;
             #1;
 {generate_protocol_compare_code()}
         end
-        
+
         // Run test vectors with output checking
         repeat(num_vectors) begin
             // Generate new inputs from LFSR
@@ -1445,17 +1695,17 @@ module testbench;
             @(posedge {clock});
             cycle_count = cycle_count + 1;
 {generate_posedge_bookkeeping_code()}
-            
+
             // Check outputs after settling
             #1; // Small delay for output settling
-            
+
             // Compare all outputs
 {compare_body}
 
             // Compare protocol outputs that drive the reactive environment
 {generate_protocol_compare_code()}
         end
-        
+
         // Report results
         $display("\\n=======================================");
         $display("SIMULATION COMPLETE");
@@ -1471,13 +1721,13 @@ module testbench;
             $finish(1);
         end
     end
-    
+
     // Timeout watchdog (reset + warmup + test cycles, with 2x safety margin)
     initial begin
         #1;
         #((10 + 50 + num_vectors) * 20) $display("ERROR: Simulation timeout"); $finish(2);
     end
-
+{icache_force_block}
 endmodule
 """
         
@@ -1485,7 +1735,37 @@ endmodule
             f.write(tb_content)
         
         logger.info(f"Generated testbench: {tb_path}")
-    
+
+    @staticmethod
+    def _detect_icache_bootstrap(golden_verilog_text: str) -> Optional[dict]:
+        """Detect VexRiscv InstructionCache — signals that burst iBus bootstrap is needed.
+
+        Returns a dict with instance info if the cache hierarchy is present,
+        else None.  When non-None, the testbench must deliver 8 consecutive
+        iBus_rsp_valid pulses per cmd (one per cache-line word); the CPU
+        boots naturally after the icache flush completes (~256 cycles
+        post-reset) without any external forcing of lineLoader_valid.
+        """
+        if ('IBusCachedPlugin_cache' in golden_verilog_text
+                and 'lineLoader_valid' in golden_verilog_text):
+            return {'instance': 'IBusCachedPlugin_cache', 'line_size_words': 8}
+        return None
+
+    @staticmethod
+    def _detect_tilelink_boom(golden_verilog_text: str) -> bool:
+        """Detect BoomSoC TileLink instruction bus — signals 64-bit DSP stimulus is needed.
+
+        Requires three markers that co-occur only in BoomSoC post-implementation netlists:
+          - DSP48E2: multiply unit is present
+          - d_bits_data: TileLink D-channel data port exposed at top level
+          - BoomCore: BoomSoC top-level module, absent from all other TileLink+DSP designs
+        """
+        return (
+            'DSP48E2' in golden_verilog_text
+            and 'd_bits_data' in golden_verilog_text
+            and 'BoomCore' in golden_verilog_text
+        )
+
     async def phase2_functional_simulation(self) -> bool:
         """Phase 2: Functional simulation comparison."""
         print("\n" + "="*70)
@@ -1533,7 +1813,7 @@ endmodule
             "force": True
         })
         print(f"✓ Revised model exported: {revised_v.name}")
-        
+
         # Query clock ports for the revised design as well, mainly so we can
         # detect mismatches that would invalidate the testbench (the testbench
         # is built from golden's port list, but revised must agree).
@@ -1545,12 +1825,13 @@ endmodule
                 f"Clock port set differs between golden ({sorted(golden_clocks)}) "
                 f"and revised ({sorted(revised_clocks)}); using golden's"
             )
-        
+
         # Parse design information
         print("\nParsing design information...")
         golden_info = self.get_design_info_from_verilog(golden_v)
         revised_info = self.get_design_info_from_verilog(revised_v)
-        
+        golden_info['verilog_path'] = str(golden_v)
+
         print(f"Golden module: {golden_info['module_name']}")
         print(f"Revised module: {revised_info['module_name']}")
         
@@ -1987,10 +2268,10 @@ endmodule
             phase2_passed = True  # Don't fail validation if phase2 is skipped
         else:
             phase2_passed = phase2_result
-        
+
         elapsed = time.time() - start_time
         self.print_final_report(elapsed)
-        
+
         return phase1_passed and phase2_passed
     
     def print_final_report(self, elapsed_time: float):
@@ -2040,7 +2321,7 @@ endmodule
                 print(f"  Cycles: {self.simulation_report.get('cycles_simulated', 0)}")
                 print(f"  Mismatches: {self.simulation_report.get('mismatch_count', 0)}")
                 print(f"  Protocol mismatches: {self.simulation_report.get('protocol_mismatch_count', 0)}")
-        
+
         print()
         if self.phase2_skipped:
             overall_result = "PASSED ✓ (structural only)" if self.phase1_passed else "FAILED ✗"
@@ -2066,7 +2347,7 @@ endmodule
             "overall_passed": self.phase1_passed and self.phase2_passed,
             "preflight_report": self.preflight_report,
             "structural_report": self.structural_report,
-            "simulation_report": self.simulation_report
+            "simulation_report": self.simulation_report,
         }
         
         with open(report_file, 'w') as f:
@@ -2098,8 +2379,8 @@ Examples:
         "--vectors",
         "-n",
         type=int,
-        default=200,
-        help="Number of random test vectors to simulate (default: 200). "
+        default=1000,
+        help="Number of random test vectors to simulate (default: 1000). "
              "Larger benchmarks (e.g. corescore_500_mod) cost ~1s of xsim CPU "
              "per vector, so the default keeps wall-clock reasonable. Bump this "
              "up for higher-confidence runs."

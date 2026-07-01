@@ -298,7 +298,7 @@ After running `dcp_optimizer.py`, you should validate that the optimized design 
 ### Usage
 
 ```bash
-# Basic validation with 200 test vectors (default)
+# Basic validation with 1000 test vectors (default)
 python3 validate_dcps.py golden.dcp optimized.dcp
 
 # More thorough validation with 10,000 vectors
@@ -326,7 +326,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 # ======================================================================
 # Golden:  logicnets_jscl.dcp
 # Revised: logicnets_jscl_optimized.dcp
-# Vectors: 200
+# Vectors: 1000
 # ======================================================================
 #
 # ======================================================================
@@ -358,7 +358,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 # Inputs: 24
 # Outputs: 16
 #
-# Generating testbench (200 random vectors)...
+# Generating testbench (1000 random vectors)...
 # ✓ Testbench generated: testbench.v
 #
 # Running xsim simulation...
@@ -366,7 +366,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 # ✓ Compilation successful
 # ✓ Elaboration successful
 #
-# Simulating 200 test vectors...
+# Simulating 1000 test vectors...
 #
 # ----------------------------------------------------------------------
 # Simulation Results:
@@ -388,7 +388,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 #   Checks: 4/4
 #
 # Phase 2 (Simulation): PASSED ✓
-#   Cycles: 200
+#   Cycles: 1000
 #   Mismatches: 0
 #
 # Overall Result: PASSED ✓
@@ -401,14 +401,15 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 |--------|-------------|---------|
 | `golden_dcp` | Golden (reference) DCP file | Required |
 | `revised_dcp` | Revised (optimized) DCP file to validate | Required |
-| `--vectors`, `-n` | Number of random test vectors to simulate | 200 |
+| `--vectors`, `-n` | Number of random test vectors to simulate | 1000 |
+| `--precheck-vectors` | Run this many vectors before the full simulation and skip the full run if the precheck fails; disabled if 0 or >= `--vectors` | 100 |
 | `--debug` | Enable debug logging | False |
 | `--no-reactive` | Disable reactive interface stimulus and use pure LFSR randomness | False |
 
 ### Notes
 
 - **Simulation time**: Dominated by `xelab` (must compile every cell in both designs) plus per-cycle `xsim` cost. For huge benchmarks like `corescore_500_mod` (~6.7K user modules, ~100K primitives) `xelab` alone takes ~14 minutes, so run-to-run wall-clock is bounded by that even with very few vectors.
-- **Vector count**: 200 vectors is sufficient to catch functional regressions on most designs while keeping wall-clock reasonable on the largest benchmarks. For higher confidence on small/medium designs use `--vectors 10000` (or more). xsim cost scales roughly linearly with vectors.
+- **Vector count**: 1000 vectors is the default and sufficient to catch functional regressions on most designs while keeping wall-clock reasonable on the largest benchmarks. For higher confidence on small/medium designs use `--vectors 10000` (or more). xsim cost scales roughly linearly with vectors.
 - **Working directory**: Preserved after validation in a repo-local `dcp_validation_*` directory with simulation logs and intermediate files.
 - **No testbench required**: The tool automatically generates stimulus based on design I/O structure.
 - **Reactive stimulus**: By default, the generated testbench recognizes common interface naming patterns and drives simple reactive behavior. This is a heuristic, golden-driven shared environment: the testbench uses the golden DUT's recognized control outputs to schedule shared inputs, and separately checks corresponding control outputs for divergence. Use `--no-reactive` to fall back to pure LFSR stimulus if those heuristics are not appropriate for a design or benchmark.

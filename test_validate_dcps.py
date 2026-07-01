@@ -5,6 +5,9 @@
 import shutil
 import tempfile
 import unittest
+import contextlib
+import io
+import json
 from pathlib import Path
 
 from validate_dcps import (
@@ -74,6 +77,25 @@ class SimulationParserTests(unittest.TestCase):
         self.assertEqual(parsed["protocol_mismatch_count"], 1)
         self.assertEqual(parsed["mismatch_count"], 0)
 
+    def test_parse_mismatch_with_fatal_marker_is_logical_fail_not_infrastructure(self):
+        parsed = parse_simulation_output(
+            "\n".join([
+                "MISMATCH at cycle 3: out golden=1 revised=0",
+                "Cycles simulated: 200",
+                "Mismatches found: 1",
+                "Protocol mismatches found: 0",
+                "FATAL: Simulation engine not responding",
+                "Result: FAIL",
+            ]),
+            returncode=1,
+            expected_cycles=200,
+        )
+
+        self.assertFalse(parsed["passed"])
+        self.assertTrue(parsed["simulator_failed"])
+        self.assertFalse(parsed["infrastructure_failure"])
+        self.assertIsNone(parsed["infrastructure_reason"])
+
     def test_parse_fails_on_xsim_fatal_marker_even_with_pass(self):
         parsed = parse_simulation_output(
             "\n".join([
@@ -98,7 +120,15 @@ class TestbenchGenerationTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.workspace, ignore_errors=True)
 
-    def _generate(self, inputs, outputs, no_reactive=False):
+    def _generate(
+        self,
+        inputs,
+        outputs,
+        no_reactive=False,
+        clock_names=None,
+        module_name="dut",
+        verilog_text=None,
+    ):
         validator = DCPValidator(
             self.workspace / "golden.dcp",
             self.workspace / "revised.dcp",
@@ -108,18 +138,22 @@ class TestbenchGenerationTests(unittest.TestCase):
         try:
             tb_path = self.workspace / "testbench.v"
             info = {
-                "module_name": "dut",
+                "module_name": module_name,
                 "ports": {
                     "inputs": inputs,
                     "outputs": outputs,
                     "inouts": [],
                 },
             }
+            if verilog_text is not None:
+                verilog_path = self.workspace / "golden_sim.v"
+                verilog_path.write_text(verilog_text)
+                info["verilog_path"] = str(verilog_path)
             validator.generate_testbench(
                 info,
                 info,
                 tb_path,
-                clock_names=[inputs[0]["name"]],
+                clock_names=clock_names if clock_names is not None else [inputs[0]["name"]],
             )
             return tb_path.read_text()
         finally:
@@ -207,6 +241,215 @@ class TestbenchGenerationTests(unittest.TestCase):
         self.assertIn("No reactive environment state", tb)
         self.assertIn("stream_tvalid = lfsr[0];", tb)
         self.assertNotIn("PROTOCOL MISMATCH", tb)
+
+    def test_non_clock_like_vivado_clock_list_falls_back_to_name_heuristic(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "clk", "width": None},
+                {"name": "commit_valid", "width": None},
+            ],
+            outputs=[
+                {"name": "out", "width": None},
+            ],
+            clock_names=["commit_valid"],
+        )
+
+        self.assertIn("forever #5 clk = ~clk;", tb)
+        self.assertIn("commit_valid = lfsr[0];", tb)
+
+    def test_generic_hls_ap_memory_32_bit_model_uses_full_width_hash(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "ap_clk", "width": None},
+                {"name": "mem_q0", "width": "[31:0]"},
+            ],
+            outputs=[
+                {"name": "mem_address0", "width": "[9:0]"},
+                {"name": "mem_ce0", "width": None},
+            ],
+        )
+
+        self.assertNotIn("function [7:0] hls_mem_byte_hash;", tb)
+        self.assertIn("mem_q0 <= ({22'b0, golden_mem_address0} * 32'h", tb)
+        self.assertNotIn("mem_q0 = lfsr[31:0];", tb)
+
+    def test_rosetta_rendering_input_memory_uses_coordinate_byte_clamp(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "ap_clk", "width": None},
+                {"name": "input_r_q0", "width": "[31:0]"},
+                {"name": "input_r_q1", "width": "[31:0]"},
+            ],
+            outputs=[
+                {"name": "input_r_address0", "width": "[13:0]"},
+                {"name": "input_r_ce0", "width": None},
+                {"name": "input_r_address1", "width": "[13:0]"},
+                {"name": "input_r_ce1", "width": None},
+            ],
+            module_name="xil_internal_svlib_rendering",
+        )
+
+        self.assertIn("function [7:0] hls_mem_byte_hash;", tb)
+        self.assertIn("input_r_q0 <= {hls_mem_byte_hash(", tb)
+        self.assertIn("input_r_q1 <= {hls_mem_byte_hash(", tb)
+
+    def test_rosetta_port_shape_without_rendering_module_uses_full_width_hash(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "ap_clk", "width": None},
+                {"name": "input_r_q0", "width": "[31:0]"},
+            ],
+            outputs=[
+                {"name": "input_r_address0", "width": "[13:0]"},
+                {"name": "input_r_ce0", "width": None},
+            ],
+            module_name="dut",
+        )
+
+        self.assertNotIn("function [7:0] hls_mem_byte_hash;", tb)
+        self.assertIn("input_r_q0 <= ({18'b0, golden_input_r_address0} * 32'h", tb)
+
+    def test_rosetta_spam_filter_label_memory_uses_full_width_hash(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "ap_clk", "width": None},
+                {"name": "label_r_q0", "width": "[31:0]"},
+            ],
+            outputs=[
+                {"name": "label_r_address0", "width": "[10:0]"},
+                {"name": "label_r_ce0", "width": None},
+            ],
+            module_name="xil_internal_svlib_SgdLR",
+        )
+
+        self.assertNotIn("function [7:0] hls_mem_byte_hash;", tb)
+        self.assertIn("label_r_q0 <= ({21'b0, golden_label_r_address0} * 32'h", tb)
+
+    def test_vexriscv_icache_ibus_enables_rv32m_burst_stimulus(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "clk", "width": None},
+                {"name": "reset", "width": None},
+                {"name": "iBus_rsp_valid", "width": None},
+                {"name": "iBus_rsp_payload_data", "width": "[31:0]"},
+                {"name": "iBus_rsp_payload_error", "width": None},
+            ],
+            outputs=[
+                {"name": "iBus_cmd_valid", "width": None},
+            ],
+            verilog_text="""
+module dut(input clk);
+  // Markers emitted by VexRiscv's cached instruction bus hierarchy.
+  wire IBusCachedPlugin_cache;
+  wire lineLoader_valid;
+endmodule
+""",
+        )
+
+        self.assertIn("function [31:0] dsp_rv32_instr;", tb)
+        self.assertIn("reg [2:0]  dsp_inj_state;", tb)
+        self.assertIn("integer env_iBus_burst_remaining;", tb)
+        self.assertIn("env_iBus_burst_remaining = 8;", tb)
+        self.assertIn("iBus_rsp_payload_data = dsp_rv32_instr(dsp_inj_state,", tb)
+        self.assertNotIn("iBus_rsp_payload_data = (dsp_inj_state", tb)
+        self.assertIn("default: dsp_rv32_instr = 32'h00000013", tb)
+        self.assertNotIn("32'hx", tb)
+        self.assertIn("DSP RV32M injection state machine (burst mode", tb)
+        # State 7 must be BNE (branch on non-zero multiply result) so mismatch is
+        # visible on iBus_cmd_payload_address without needing dBus ports.
+        self.assertIn("BNE rd3,x0,+64", tb)
+        self.assertNotIn("SW rd3,0(x0)", tb)
+        # Operands must be fixed non-zero constants so MUL always produces a
+        # non-zero result in the golden design (zero LFSR fields would silence it).
+        self.assertIn("dsp_inj_imm1 <= 12'd7;", tb)
+        self.assertIn("dsp_inj_imm2 <= 12'd11;", tb)
+
+
+    def test_wide_reset_named_port_gets_lfsr_stimulus_not_reset_treatment(self):
+        tb = self._generate(
+            inputs=[
+                {"name": "clk", "width": None},
+                {"name": "reset", "width": None},
+                {"name": "resetVector", "width": "[31:0]"},
+            ],
+            outputs=[
+                {"name": "out", "width": None},
+            ],
+        )
+
+        self.assertIn("reg [31:0] resetVector;", tb)
+        self.assertNotIn("resetVector = 1;", tb)
+        self.assertIn("resetVector = lfsr[31:0];", tb)
+
+    def test_detect_tilelink_boom_requires_all_three_markers(self):
+        # Missing any one of the three markers must return False.
+        self.assertFalse(DCPValidator._detect_tilelink_boom(
+            "wire d_bits_data; module BoomCore();"))
+        self.assertFalse(DCPValidator._detect_tilelink_boom(
+            "DSP48E2 #(.PREG(0)) dsp0 (); module BoomCore();"))
+        self.assertFalse(DCPValidator._detect_tilelink_boom(
+            "DSP48E2 #(.PREG(0)) dsp0 (); wire d_bits_data;"))
+        self.assertTrue(DCPValidator._detect_tilelink_boom(
+            "DSP48E2 #(.PREG(0)) dsp0 (); wire d_bits_data; module BoomCore();"
+        ))
+
+    def test_boomsoc_tilelink_enables_64bit_dsp_stimulus(self):
+        # TileLink D channel: d_valid (input), d_ready (output), d_bits_data (input).
+        # The d_ready output is required for the generic valid/ready detector to
+        # recognise mem_d as a request interface with mem_d_bits_data as payload.
+        tb = self._generate(
+            inputs=[
+                {"name": "clk", "width": None},
+                {"name": "reset", "width": None},
+                {"name": "mem_d_valid", "width": None},
+                {"name": "mem_d_bits_data", "width": "[63:0]"},
+                {"name": "mem_a_ready", "width": None},
+            ],
+            outputs=[
+                {"name": "mem_a_valid", "width": None},
+                {"name": "mem_d_ready", "width": None},
+            ],
+            verilog_text="""
+module BoomCore(input clk);
+  DSP48E2 #(.PREG(0)) dsp0 (.CLK(clk), .CEP(1'b1));
+  wire d_bits_data;
+endmodule
+""",
+        )
+
+        self.assertIn("function [31:0] dsp_rv32_instr;", tb)
+        self.assertIn("Reactive request driver for mem_d", tb)
+
+    def test_tilelink_a_prefix_derived_from_suffix_not_first_occurrence(self):
+        # A prefix like tile_dcache_d must become tile_dcache_a, not tile_acache_d.
+        # The old replace('_d', '_a', 1) would corrupt the first _d in the prefix.
+        tb = self._generate(
+            inputs=[
+                {"name": "clk", "width": None},
+                {"name": "tile_dcache_d_valid", "width": None},
+                {"name": "tile_dcache_d_bits_data", "width": "[63:0]"},
+                {"name": "tile_dcache_d_bits_source", "width": "[3:0]"},
+                {"name": "tile_dcache_d_bits_size", "width": "[2:0]"},
+            ],
+            outputs=[
+                {"name": "tile_dcache_a_valid", "width": None},
+                {"name": "tile_dcache_d_ready", "width": None},
+                {"name": "tile_dcache_a_bits_source", "width": "[3:0]"},
+                {"name": "tile_dcache_a_bits_size", "width": "[2:0]"},
+            ],
+            verilog_text="""
+module BoomCore(input clk);
+  DSP48E2 #(.PREG(0)) dsp0 (.CLK(clk), .CEP(1'b1));
+  wire d_bits_data;
+endmodule
+""",
+        )
+
+        # Source and size echoes must reference the correct a-channel outputs.
+        self.assertIn("golden_tile_dcache_a_bits_source", tb)
+        self.assertIn("golden_tile_dcache_a_bits_size", tb)
+        # The corrupted prefix must not appear anywhere.
+        self.assertNotIn("tile_acache", tb)
 
 
 if __name__ == "__main__":
