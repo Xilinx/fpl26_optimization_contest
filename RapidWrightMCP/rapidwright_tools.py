@@ -1170,8 +1170,9 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
     Performs sanity checks to catch obvious errors:
     - Top-level module name
     - I/O port names, directions, and widths
-    - Cell count comparison
-    - Clock structure
+    - Device compatibility
+
+    Cell counts are reported for context but are not pass/fail criteria.
     
     Args:
         golden_dcp: Path to the golden (reference) DCP file
@@ -1285,44 +1286,16 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
         else:
             issues.extend(port_issues)
         
-        # Check 4: Cell count (should increase or stay same, small decreases allowed)
-        checks_total += 1
-        golden_cell_count = golden.getCells().size()
-        revised_cell_count = revised.getCells().size()
-        
-        cell_change_pct = (revised_cell_count - golden_cell_count) / golden_cell_count * 100
-        
-        # Allow small decrease (<=3%), up to 50% increase (optimizations can add/remove cells)
-        if (revised_cell_count >= golden_cell_count * 0.97 and 
-            revised_cell_count <= golden_cell_count * 1.5):
-            checks_passed += 1
-            # Note small changes as info, not error
-            if revised_cell_count < golden_cell_count:
-                issues.append(
-                    f"INFO: Cell count decreased slightly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({abs(cell_change_pct):.2f}% decrease - likely due to optimization)"
-                )
-            elif revised_cell_count > golden_cell_count:
-                issues.append(
-                    f"INFO: Cell count increased: {golden_cell_count} -> {revised_cell_count} "
-                    f"({cell_change_pct:.2f}% increase - likely due to optimization)"
-                )
-        else:
-            if revised_cell_count < golden_cell_count:
-                issues.append(
-                    f"Cell count decreased significantly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({abs(cell_change_pct):.2f}% decrease - this may indicate logic removal)"
-                )
-            else:
-                issues.append(
-                    f"Cell count increased significantly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({cell_change_pct:.1f}% increase - this may indicate excessive optimization)"
-                )
-        
         # Summary - only count real issues (not INFO)
         real_issues = [i for i in issues if not i.startswith("INFO:")]
         all_checks_passed = (checks_passed == checks_total)
-        
+
+        # Cell counts are reported for information only; they are intentionally
+        # NOT part of the pass/fail checks above (the cell-count check was
+        # removed because optimization legitimately changes cell counts).
+        golden_cell_count = golden.getCells().size()
+        revised_cell_count = revised.getCells().size()
+
         result = {
             "status": "success",
             "comparison_result": "PASS" if all_checks_passed else "FAIL",
@@ -1909,4 +1882,3 @@ def convert_fabric_region_to_pblock_ranges(
         import traceback
         traceback.print_exc()
         return {"error": str(e)}
-

@@ -289,7 +289,7 @@ After running `dcp_optimizer.py`, you should validate that the optimized design 
 - Verifies top-level module name matches
 - Checks I/O ports (names, directions, widths) are identical
 - Validates device compatibility
-- Ensures cell count is reasonable (can increase but not decrease)
+- Reports cell counts for context without using them as pass/fail criteria
 
 **Phase 2: Functional Simulation** (via Vivado + xsim)
 - Exports both designs as Verilog simulation models
@@ -337,7 +337,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 #
 # Comparing design structures...
 #
-# Structural Checks: 4/4 passed
+# Structural Checks: 3/3 passed
 # Result: PASS
 #
 # No issues found - designs are structurally compatible
