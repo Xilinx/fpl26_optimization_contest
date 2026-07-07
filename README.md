@@ -337,7 +337,7 @@ python3 validate_dcps.py fpl26_contest_benchmarks/logicnets_jscl_2025.1.dcp logi
 #
 # Comparing design structures...
 #
-# Structural Checks: 4/4 passed
+# Structural Checks: 3/3 passed
 # Result: PASS
 #
 # No issues found - designs are structurally compatible
