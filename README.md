@@ -289,7 +289,7 @@ After running `dcp_optimizer.py`, you should validate that the optimized design 
 - Verifies top-level module name matches
 - Checks I/O ports (names, directions, widths) are identical
 - Validates device compatibility
-- Ensures cell count is reasonable (can increase but not decrease)
+- Reports cell counts for context without using them as pass/fail criteria
 
 **Phase 2: Functional Simulation** (via Vivado + xsim)
 - Exports both designs as Verilog simulation models

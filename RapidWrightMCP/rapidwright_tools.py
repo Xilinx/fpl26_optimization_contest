@@ -1170,8 +1170,9 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
     Performs sanity checks to catch obvious errors:
     - Top-level module name
     - I/O port names, directions, and widths
-    - Cell count comparison
-    - Clock structure
+    - Device compatibility
+
+    Cell counts are reported for context but are not pass/fail criteria.
     
     Args:
         golden_dcp: Path to the golden (reference) DCP file
@@ -1881,4 +1882,3 @@ def convert_fabric_region_to_pblock_ranges(
         import traceback
         traceback.print_exc()
         return {"error": str(e)}
-

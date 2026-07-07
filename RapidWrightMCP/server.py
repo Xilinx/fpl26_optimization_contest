@@ -322,7 +322,7 @@ async def list_tools() -> list[Tool]:
             - Top-level module name must match
             - I/O port names, directions, and widths must match
             - Device must match
-            - Cell count can increase (optimizations add cells) but not decrease or increase >50%
+            - Cell counts are reported for context but do not affect PASS/FAIL
             
             Returns PASS/FAIL status with detailed comparison report.
             This should be run BEFORE functional simulation to quickly catch structural errors.""",
