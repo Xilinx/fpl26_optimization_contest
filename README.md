@@ -121,6 +121,8 @@ The `make setup` command will:
 - Build RapidWright from the `RapidWright/` git submodule source
 - Download and extract benchmark DCPs into `fpl26_contest_benchmarks/`
 
+> **Evaluation note:** During official evaluation your submission runs on a freshly provisioned instance containing only your submitted archive, and `make setup` must be fully self-contained and complete within **90 minutes** — otherwise the submission is marked `setup_failed` and receives no score. See the [runtime environment](docs/runtime.md) for details.
+
 #### Manual Installation
 
 If you prefer not to use the Makefile:
