@@ -2247,15 +2247,37 @@ endmodule
             ]
             if use_lfsr_seed:
                 sim_cmd += ["--testplusarg", f"LFSR_SEED={self.lfsr_seed:08X}"]
-            result = subprocess.run(
-                sim_cmd,
-                cwd=work_dir,
-                capture_output=True,
-                text=True,
-                env=vivado_env,
-                timeout=xsim_timeout_for(vector_count),
-            )
-            sim_output = result.stdout + result.stderr
+
+            # The xsim kernel occasionally throws a load-time fault
+            # ("unexpected exception when evaluating tcl command") before the
+            # simulation even starts (no "run -all"/completion output). This is
+            # a transient runtime/resource failure of the simulator, not a
+            # design or testbench problem: re-running the identical snapshot
+            # succeeds. Retry a bounded number of times so a healthy DUT is not
+            # spuriously reported as an infrastructure failure.
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                result = subprocess.run(
+                    sim_cmd,
+                    cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    env=vivado_env,
+                    timeout=xsim_timeout_for(vector_count),
+                )
+                sim_output = result.stdout + result.stderr
+                transient_load_crash = (
+                    "unexpected exception when evaluating tcl command" in sim_output
+                    and "SIMULATION COMPLETE" not in sim_output
+                )
+                if not transient_load_crash or attempt == max_attempts:
+                    break
+                logger.warning(
+                    f"xsim {label} run hit a transient load-time fault "
+                    f"(attempt {attempt}/{max_attempts}); retrying..."
+                )
+                time.sleep(2 * attempt)
+
             log_file = self.temp_dir / f"simulation_{label}.log"
             with open(log_file, "w") as f:
                 f.write(sim_output)
