@@ -128,6 +128,7 @@ class TestbenchGenerationTests(unittest.TestCase):
         clock_names=None,
         module_name="dut",
         verilog_text=None,
+        mode="golden_trace",
     ):
         validator = DCPValidator(
             self.workspace / "golden.dcp",
@@ -154,6 +155,7 @@ class TestbenchGenerationTests(unittest.TestCase):
                 info,
                 tb_path,
                 clock_names=clock_names if clock_names is not None else [inputs[0]["name"]],
+                mode=mode,
             )
             return tb_path.read_text()
         finally:
@@ -176,7 +178,7 @@ class TestbenchGenerationTests(unittest.TestCase):
         self.assertIn("reg env_foo_bar_1_pending;", tb)
 
     def test_ready_valid_sink_emits_protocol_check(self):
-        tb = self._generate(
+        ports = dict(
             inputs=[
                 {"name": "clk", "width": None},
                 {"name": "stream_tvalid", "width": None},
@@ -187,11 +189,17 @@ class TestbenchGenerationTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("if (golden_stream_tready) begin", tb)
-        self.assertIn("PROTOCOL MISMATCH at cycle %0d: stream_tready", tb)
+        # The golden trace TB drives the reactive environment from golden's
+        # outputs; the revised replay TB compares replayed outputs and emits the
+        # protocol mismatch check.
+        golden = self._generate(mode="golden_trace", **ports)
+        replay = self._generate(mode="revised_replay", **ports)
+
+        self.assertIn("if (golden_stream_tready) begin", golden)
+        self.assertIn("PROTOCOL MISMATCH at cycle %0d: stream_tready", replay)
 
     def test_command_response_emits_protocol_check(self):
-        tb = self._generate(
+        ports = dict(
             inputs=[
                 {"name": "clk", "width": None},
                 {"name": "mem_rsp_valid", "width": None},
@@ -203,12 +211,15 @@ class TestbenchGenerationTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("Reactive responder for mem", tb)
-        self.assertIn("PROTOCOL MISMATCH at cycle %0d: mem_cmd_valid", tb)
-        self.assertIn("mem_rsp_payload_data = {", tb)
+        golden = self._generate(mode="golden_trace", **ports)
+        replay = self._generate(mode="revised_replay", **ports)
+
+        self.assertIn("Reactive responder for mem", golden)
+        self.assertIn("mem_rsp_payload_data = {", golden)
+        self.assertIn("PROTOCOL MISMATCH at cycle %0d: mem_cmd_valid", replay)
 
     def test_hls_control_emits_protocol_checks(self):
-        tb = self._generate(
+        ports = dict(
             inputs=[
                 {"name": "ap_clk", "width": None},
                 {"name": "ap_start", "width": None},
@@ -221,10 +232,13 @@ class TestbenchGenerationTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("Transactional HLS control driver", tb)
-        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_done", tb)
-        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_idle", tb)
-        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_ready", tb)
+        golden = self._generate(mode="golden_trace", **ports)
+        replay = self._generate(mode="revised_replay", **ports)
+
+        self.assertIn("Transactional HLS control driver", golden)
+        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_done", replay)
+        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_idle", replay)
+        self.assertIn("PROTOCOL MISMATCH at cycle %0d: ap_ready", replay)
 
     def test_no_reactive_disables_reactive_environment(self):
         tb = self._generate(

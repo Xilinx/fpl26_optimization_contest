@@ -14,6 +14,7 @@ Uses a two-phase approach:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -178,6 +179,9 @@ class DCPValidator:
         precheck_vectors: int = 100,
         debug: bool = False,
         no_reactive: bool = False,
+        use_sim_cache: bool = True,
+        sim_cache_dir: Optional[Path] = None,
+        lfsr_seed: Optional[int] = None,
     ):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
@@ -185,17 +189,20 @@ class DCPValidator:
         self.precheck_vectors = precheck_vectors
         self.debug = debug
         self.no_reactive = no_reactive
-        
+        self.use_sim_cache = use_sim_cache
+        self.lfsr_seed = lfsr_seed if lfsr_seed is not None else int.from_bytes(os.urandom(4), 'big')
+
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
         self.vivado_session: Optional[ClientSession] = None
-        
+
         # Create temporary directory for intermediate files in workspace
         # (avoids /tmp running out of space for large designs)
         workspace_dir = Path(__file__).parent
         self.temp_dir = Path(tempfile.mkdtemp(prefix="dcp_validation_", dir=workspace_dir))
+        self.sim_cache_dir = sim_cache_dir or (workspace_dir / ".xsim_validation_cache")
         logger.info(f"Working directory: {self.temp_dir}")
-        
+
         # Results
         self.phase1_passed = False
         self.phase2_passed = False
@@ -206,6 +213,88 @@ class DCPValidator:
         self.preflight_report = None
         self.infrastructure_failure = False
         self.infrastructure_reason = None
+
+    class _LocalToolResult:
+        def __init__(self, content):
+            self.content = content
+
+    class _LocalToolSession:
+        def __init__(self, handler):
+            self._handler = handler
+
+        async def call_tool(self, name: str, arguments: dict):
+            return DCPValidator._LocalToolResult(
+                await self._handler(name, arguments)
+            )
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _trace_simulation_cache_key(self, vivado_path: str, role: str) -> Tuple[str, dict]:
+        """Return a cache key for split golden-trace/revised-replay snapshots."""
+        script_path = Path(__file__).resolve()
+        manifest = {
+            "cache_schema": 2,
+            "role": role,
+            "golden_dcp": str(self.golden_dcp.resolve()),
+            "golden_sha256": self._sha256_file(self.golden_dcp.resolve()),
+            "validator_sha256": self._sha256_file(script_path),
+            "vivado_path": str(Path(vivado_path).resolve()),
+            "no_reactive": self.no_reactive,
+        }
+        if role == "revised_replay":
+            manifest.update({
+                "revised_dcp": str(self.revised_dcp.resolve()),
+                "revised_sha256": self._sha256_file(self.revised_dcp.resolve()),
+            })
+        elif role != "golden_trace":
+            raise ValueError(f"Unknown trace simulation cache role: {role}")
+
+        key_material = json.dumps(manifest, sort_keys=True).encode("utf-8")
+        # Store seed in manifest after computing the key so it doesn't affect cache lookup.
+        # The xelab snapshot is seed-independent (seed passed at xsim runtime via +LFSR_SEED).
+        manifest["lfsr_seed"] = f"{self.lfsr_seed:08X}"
+        return hashlib.sha256(key_material).hexdigest(), manifest
+
+    @staticmethod
+    def _xsim_snapshot_exists(xsim_dir: Path) -> bool:
+        xsim_root = xsim_dir / "xsim.dir"
+        if not xsim_root.is_dir():
+            return False
+        return any(path.name == "xsimk" for path in xsim_root.glob("*/xsimk"))
+
+    def _restore_cached_xsim_work(self, cache_entry: Path, xsim_dir: Path) -> bool:
+        cache_work = cache_entry / "xsim_work"
+        if not self._xsim_snapshot_exists(cache_work):
+            return False
+        if xsim_dir.exists():
+            shutil.rmtree(xsim_dir)
+        shutil.copytree(cache_work, xsim_dir)
+        return self._xsim_snapshot_exists(xsim_dir)
+
+    def _store_cached_xsim_work(self, cache_entry: Path, xsim_dir: Path, manifest: dict):
+        if not self.use_sim_cache or not self._xsim_snapshot_exists(xsim_dir):
+            return
+
+        self.sim_cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_entry = cache_entry.with_name(f"{cache_entry.name}.tmp-{os.getpid()}")
+        if tmp_entry.exists():
+            shutil.rmtree(tmp_entry)
+        tmp_entry.mkdir(parents=True)
+        shutil.copytree(xsim_dir, tmp_entry / "xsim_work")
+        manifest = dict(manifest)
+        manifest["cached_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(tmp_entry / "manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2, sort_keys=True)
+
+        if cache_entry.exists():
+            shutil.rmtree(cache_entry)
+        os.replace(tmp_entry, cache_entry)
 
     def _copy_dcp_for_rapidwright(self, src_dcp: Path, label: str) -> Path:
         """Copy a DCP into validator-owned space and build a fresh EDIF sidecar.
@@ -316,14 +405,34 @@ class DCPValidator:
     async def start_servers(self):
         """Start both MCP servers."""
         script_dir = Path(__file__).parent.resolve()
-        
+
         # Create log files in temp directory
         rapidwright_log = self.temp_dir / "rapidwright.log"
         rapidwright_mcp_log = self.temp_dir / "rapidwright-mcp.log"
         vivado_log = self.temp_dir / "vivado.log"
         vivado_journal = self.temp_dir / "vivado.jou"
         vivado_mcp_log = self.temp_dir / "vivado-mcp.log"
-        
+
+        # The installed MCP stdio stack in this environment can initialize
+        # subprocess servers but then stall on subsequent tool requests. Use the
+        # same tool handlers in-process; the validator-facing call_tool contract
+        # stays identical.
+        logger.info("Starting in-process RapidWright and Vivado tool sessions...")
+        for tool_dir in (script_dir / "RapidWrightMCP", script_dir / "VivadoMCP"):
+            tool_dir_str = str(tool_dir)
+            if tool_dir_str not in sys.path:
+                sys.path.insert(0, tool_dir_str)
+        from RapidWrightMCP import server as rapidwright_server
+        from VivadoMCP import vivado_mcp_server as vivado_server
+
+        vivado_server._vivado_log_file = str(vivado_log)
+        vivado_server._vivado_journal_file = str(vivado_journal)
+
+        self.rapidwright_session = self._LocalToolSession(rapidwright_server.call_tool)
+        self.vivado_session = self._LocalToolSession(vivado_server.call_tool)
+        logger.info("In-process tool sessions started")
+        return
+
         # RapidWright MCP - with log redirection
         rapidwright_args = [str(script_dir / "RapidWrightMCP" / "server.py")]
         if not self.debug:
@@ -331,13 +440,13 @@ class DCPValidator:
                 "--java-log", str(rapidwright_log),
                 "--mcp-log", str(rapidwright_mcp_log)
             ])
-        
+
         rapidwright_config = {
             "command": sys.executable,
             "args": rapidwright_args,
             "env": {**os.environ}
         }
-        
+
         logger.info("Starting RapidWright MCP server...")
         rw_params = StdioServerParameters(**rapidwright_config)
         rw_transport = await self.exit_stack.enter_async_context(stdio_client(rw_params))
@@ -346,7 +455,7 @@ class DCPValidator:
             ClientSession(rw_read, rw_write)
         )
         await self.rapidwright_session.initialize()
-        
+
         # Vivado MCP - with log redirection
         vivado_args = [str(script_dir / "VivadoMCP" / "vivado_mcp_server.py")]
         if not self.debug:
@@ -354,13 +463,13 @@ class DCPValidator:
                 "--vivado-log", str(vivado_log),
                 "--vivado-journal", str(vivado_journal)
             ])
-        
+
         vivado_config = {
             "command": sys.executable,
             "args": vivado_args,
             "env": {**os.environ}
         }
-        
+
         logger.info("Starting Vivado MCP server...")
         v_params = StdioServerParameters(**vivado_config)
         v_transport = await self.exit_stack.enter_async_context(stdio_client(v_params))
@@ -369,19 +478,19 @@ class DCPValidator:
             ClientSession(v_read, v_write)
         )
         await self.vivado_session.initialize()
-        
+
         logger.info("Both MCP servers started")
-    
+
     async def phase1_structural_checks(self) -> bool:
         """Phase 1: Structural sanity checks using RapidWright."""
         print("\n" + "="*70)
         print("PHASE 1: STRUCTURAL SANITY CHECKS")
         print("="*70)
-        
+
         # Initialize RapidWright
         logger.info("Initializing RapidWright...")
         result = await self.rapidwright_session.call_tool("initialize_rapidwright", {})
-        
+
         # Compare designs
         logger.info("Comparing design structures...")
         print("\nComparing design structures...")
@@ -432,52 +541,52 @@ class DCPValidator:
                 "status": "not_needed",
                 "reason": "rapidwright_direct_compare_succeeded_or_non_readability_failure",
             }
-        
+
         # Check if passed
         if "error" in self.structural_report:
             print(f"\n✗ ERROR: {self.structural_report['error']}")
             return False
-        
+
         comparison_result = self.structural_report.get("comparison_result", "FAIL")
         checks_passed = self.structural_report.get("checks_passed", 0)
         checks_total = self.structural_report.get("checks_total", 0)
         issues = self.structural_report.get("issues", [])
-        
+
         # Separate INFO issues from real issues
         info_issues = [i for i in issues if i.startswith("INFO:")]
         real_issues = [i for i in issues if not i.startswith("INFO:")]
-        
+
         print(f"\nStructural Checks: {checks_passed}/{checks_total} passed")
-        
+
         if real_issues:
             print("\nIssues found:")
             for issue in real_issues:
                 print(f"  - {issue}")
-        
+
         if info_issues:
             print("\nInformational notes:")
             for issue in info_issues:
                 print(f"  ℹ {issue[5:].strip()}")  # Remove "INFO:" prefix
-        
+
         if not real_issues and not info_issues:
             print("\nNo issues found - designs are structurally compatible")
-        
+
         self.phase1_passed = (comparison_result == "PASS")
-        
+
         print("\n" + "-"*70)
         if self.phase1_passed:
             print("Phase 1: PASSED ✓")
         else:
             print("Phase 1: FAILED ✗")
         print("-"*70)
-        
+
         return self.phase1_passed
-    
+
     def _check_for_encrypted_ip(self, verilog_path: Path) -> bool:
         """Check if Verilog file contains encrypted or SIP IP blocks."""
         with open(verilog_path, 'r') as f:
             content = f.read(200000)  # Check first 200KB
-        
+
         # Look for SIP modules, encrypted IP, or hard IP blocks that require special libraries
         sip_patterns = [
             r'GTYE4_CHANNEL',       # GTY transceivers
@@ -494,14 +603,14 @@ class DCPValidator:
             r'encrypted',           # Encrypted netlist
             r'ENCRYPTED_VERILOG'    # Encrypted Verilog marker
         ]
-        
+
         for pattern in sip_patterns:
             if re.search(pattern, content, re.IGNORECASE):
                 logger.debug(f"Found encrypted/SIP pattern: {pattern}")
                 return True
-        
+
         return False
-    
+
     def _is_encrypted_ip_error(self, error_text: str) -> bool:
         """Check if elaboration error is due to encrypted/SIP IP."""
         sip_error_patterns = [
@@ -511,14 +620,14 @@ class DCPValidator:
             r'SIP_PCIE',
             r'instantiating unknown module SIP_',
         ]
-        
+
         for pattern in sip_error_patterns:
             if re.search(pattern, error_text, re.IGNORECASE):
                 logger.debug(f"Found SIP error pattern: {pattern}")
                 return True
-        
+
         return False
-    
+
     # Tcl helper that emits the top-level clock port names of the currently
     # open design between sentinel markers. Sourced into Vivado on demand.
     #
@@ -571,7 +680,7 @@ proc __vd_find_clock_ports {} {
     puts $mE
 }
 """
-    
+
     async def _query_clock_ports_from_vivado(self) -> list:
         """Query Vivado for the top-level clock port names of the open design.
 
@@ -587,7 +696,7 @@ proc __vd_find_clock_ports {} {
         if not helper_path.exists():
             with open(helper_path, "w") as f:
                 f.write(self._CLOCK_PORT_DETECT_TCL)
-        
+
         cmd = f"source {{{helper_path}}}; __vd_find_clock_ports"
         try:
             result = await self.vivado_session.call_tool(
@@ -596,11 +705,11 @@ proc __vd_find_clock_ports {} {
         except Exception as e:
             logger.warning(f"Failed to query clock ports from Vivado: {e}")
             return []
-        
+
         if not result.content:
             return []
         text = "\n".join(c.text for c in result.content if hasattr(c, 'text'))
-        
+
         # Markers must match the dynamic ``format`` calls in the Tcl helper.
         m = re.search(
             r'__VDCLKP_BEGIN__\s*(.*?)\s*__VDCLKP_ENDX__',
@@ -609,7 +718,7 @@ proc __vd_find_clock_ports {} {
         if not m:
             logger.debug(f"Clock-port markers not found in run_tcl output; got: {text[:500]!r}")
             return []
-        
+
         names: list = []
         seen: set = set()
         # Valid Verilog port identifiers are word characters; reject anything
@@ -628,12 +737,12 @@ proc __vd_find_clock_ports {} {
                 seen.add(name)
                 names.append(name)
         return names
-    
+
     def get_design_info_from_verilog(self, verilog_path: Path) -> dict:
         """Extract design information from Verilog file (module name, ports)."""
         with open(verilog_path, 'r') as f:
             lines = f.readlines()
-        
+
         # Use structural report to find the correct top-level module name
         target_module_name = None
         if self.structural_report:
@@ -641,43 +750,43 @@ proc __vd_find_clock_ports {} {
                 target_module_name = self.structural_report.get("golden_design", {}).get("top_module")
             else:
                 target_module_name = self.structural_report.get("revised_design", {}).get("top_module")
-        
+
         # Parse line by line to find target module and its ports
         i = 0
         while i < len(lines):
             line = lines[i]
-            
+
             # Look for module declaration
             if line.startswith('module '):
                 module_match = re.search(r'module\s+(\w+)', line)
                 if not module_match:
                     i += 1
                     continue
-                
+
                 module_name = module_match.group(1)
-                
+
                 # Check if this is the module we're looking for
                 if target_module_name and module_name != target_module_name:
                     i += 1
                     continue
-                
+
                 # Found the target module, now parse its ports
                 # Skip past the port list in parentheses to the port declarations
                 while i < len(lines) and ');' not in lines[i]:
                     i += 1
                 i += 1  # Skip the "); line
-                
+
                 # Now parse port declarations (input/output/inout lines)
                 # Store as list of dicts with 'name' and 'width' (e.g., [63:0] or None for single bit)
                 ports = {"inputs": [], "outputs": [], "inouts": []}
-                
+
                 while i < len(lines):
                     line = lines[i].strip()
-                    
+
                     # Stop at wire declarations (ports section is done)
                     if line.startswith('wire ') or line.startswith('reg ') or line == '':
                         break
-                    
+
                     if line.startswith('input '):
                         # Match: input [high:low] name; or input name;
                         port_match = re.search(r'input\s+(?:\[(\d+):(\d+)\]\s*)?(\w+)', line)
@@ -703,22 +812,29 @@ proc __vd_find_clock_ports {} {
                             name = port_match.group(3)
                             width = f"[{high_bit}:{low_bit}]" if high_bit else None
                             ports["inouts"].append({"name": name, "width": width})
-                    
+
                     i += 1
-                
+
                 # Found target module with ports
                 return {"module_name": module_name, "ports": ports}
-            
+
             i += 1
-        
+
         # If we get here, we didn't find the target module
         if target_module_name:
             raise ValueError(f"Could not find module '{target_module_name}' in {verilog_path}")
         else:
             raise ValueError(f"Could not find any module in {verilog_path}")
-    
-    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path,
-                           clock_names: Optional[list] = None):
+
+    def generate_testbench(
+        self,
+        golden_info: dict,
+        revised_info: dict,
+        tb_path: Path,
+        clock_names: Optional[list] = None,
+        mode: str = "golden_trace",
+        trace_filename: str = "golden_trace.hex",
+    ):
         """Generate Verilog testbench for comparing two designs.
 
         ``clock_names`` is the authoritative list of top-level clock port names
@@ -727,17 +843,20 @@ proc __vd_find_clock_ports {} {
         heuristic (which fails for Chisel/Rocket-Chip-style designs whose
         clocks are named ``clock`` rather than ``clk``).
         """
+        if mode not in {"golden_trace", "revised_replay"}:
+            raise ValueError(f"Unknown testbench mode: {mode}")
+
         golden_module = golden_info["module_name"]
         revised_module = revised_info["module_name"] + "_revised"  # Use renamed module
-        
+
         inputs = golden_info["ports"]["inputs"]  # List of {name, width}
         outputs = golden_info["ports"]["outputs"]  # List of {name, width}
-        
+
         # Check for outputs
         if not outputs:
             logger.warning("Design has no outputs - simulation will only verify no crashes occur")
             print("⚠ Warning: Design has no outputs - limited verification possible")
-        
+
         # Identify clocks. Prefer the constraint-based list from Vivado; fall
         # back to a broadened substring heuristic only if Vivado gave us
         # nothing (e.g. an unconstrained design with no SDC).
@@ -784,20 +903,20 @@ proc __vd_find_clock_ports {} {
                 p for p in inputs
                 if 'clk' in p['name'].lower() or 'clock' in p['name'].lower()
             ]
-        
+
         # Reset detection remains heuristic - DCPs do not carry a canonical
         # "this port is the reset" property the way they do for clocks.
         resets = [p for p in inputs
                   if ('rst' in p['name'].lower() or 'reset' in p['name'].lower())
                   and port_bit_width(p) == 1]
-        
+
         if not clocks:
             raise ValueError("No clock signal found in design")
-        
+
         # Everything that isn't a clock or reset is driven by the LFSR stimulus.
         special_names = {p['name'] for p in clocks} | {p['name'] for p in resets}
         regular_inputs = [p for p in inputs if p['name'] not in special_names]
-        
+
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
 
@@ -1162,7 +1281,7 @@ proc __vd_find_clock_ports {} {
             for port in outputs:
                 connections.append(f".{port['name']}({module_suffix}{port['name']})")
             return ',\n        '.join(connections)
-        
+
         def generate_fallback_random_assignments() -> str:
             """Generate plain LFSR stimulus for any input not covered by a reactive driver."""
             stim_lines = []
@@ -1490,6 +1609,93 @@ proc __vd_find_clock_ports {} {
             end''')
             return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
 
+        def protocol_output_names() -> list:
+            protocol_outputs = []
+            seen_protocol_outputs = set()
+
+            def add_protocol_output(name: Optional[str]):
+                if name and name in output_by_name and name not in seen_protocol_outputs:
+                    seen_protocol_outputs.add(name)
+                    protocol_outputs.append(name)
+
+            for iface in response_ifaces:
+                add_protocol_output(iface['cmd_valid_out'])
+            for iface in request_ifaces:
+                add_protocol_output(iface['ready_out'])
+            if hls_iface:
+                add_protocol_output(hls_iface['done_out'])
+                add_protocol_output(hls_iface['idle_out'])
+                add_protocol_output(hls_iface['ready_out'])
+            return protocol_outputs
+
+        def trace_scan_format() -> str:
+            # phase + regular inputs + expected outputs
+            fields = 1 + len(regular_inputs) + len(outputs)
+            return ' '.join(['%h'] * fields)
+
+        def trace_signal_args(output_prefix: str) -> str:
+            args = ["trace_phase"]
+            args.extend(port['name'] for port in regular_inputs)
+            args.extend(f"{output_prefix}{port['name']}" for port in outputs)
+            return ', '.join(args)
+
+        def trace_expected_declarations() -> str:
+            decls = ["    reg trace_phase;"]
+            for port in outputs:
+                width = f"{port['width']} " if port['width'] else ""
+                decls.append(f"    reg {width}expected_{port['name']};")
+            return '\n'.join(decls)
+
+        def trace_expected_args() -> str:
+            args = ["trace_phase"]
+            args.extend(port['name'] for port in regular_inputs)
+            args.extend(f"expected_{port['name']}" for port in outputs)
+            return ', '.join(args)
+
+        def trace_write_code(phase: int) -> str:
+            fmt = trace_scan_format()
+            args = trace_signal_args("golden_")
+            return (
+                f"            trace_phase = 1'b{phase};\n"
+                f"            $fwrite(trace_fd, \"{fmt}\\n\", {args});"
+            )
+
+        def trace_read_code(expected_phase: int) -> str:
+            fmt = trace_scan_format()
+            args = trace_expected_args()
+            expected_count = 1 + len(regular_inputs) + len(outputs)
+            return f"""
+            trace_status = $fscanf(trace_fd, "{fmt}\\n", {args});
+            if (trace_status != {expected_count}) begin
+                $display("ERROR: Trace read failed at cycle %0d: status=%0d expected={expected_count}", cycle_count, trace_status);
+                $finish(2);
+            end
+            if (trace_phase !== 1'b{expected_phase}) begin
+                $display("ERROR: Trace phase mismatch at cycle %0d: got=%0d expected={expected_phase}", cycle_count, trace_phase);
+                $finish(2);
+            end"""
+
+        def generate_replay_protocol_compare_code() -> str:
+            lines = []
+            for name in protocol_output_names():
+                lines.append(f'''
+            if (expected_{name} !== revised_{name}) begin
+                $display("PROTOCOL MISMATCH at cycle %0d: {name} golden=%h revised=%h", cycle_count, expected_{name}, revised_{name});
+                protocol_mismatch_count = protocol_mismatch_count + 1;
+            end''')
+            return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
+
+        def generate_replay_output_compare_code() -> str:
+            lines = []
+            for port in outputs:
+                name = port['name']
+                lines.append(f'''
+            if (expected_{name} !== revised_{name}) begin
+                $display("MISMATCH at cycle %0d: {name} golden=%h revised=%h", cycle_count, expected_{name}, revised_{name});
+                mismatch_count = mismatch_count + 1;
+            end''')
+            return '\n'.join(lines) if lines else '            // No outputs to compare'
+
         def generate_hls_mem_model_code() -> str:
             if not hls_mem_ifaces:
                 return ''
@@ -1601,7 +1807,7 @@ proc __vd_find_clock_ports {} {
         # natural boot.
         icache_force_block = ""
 
-        tb_content = f"""
+        golden_trace_tb_content = f"""
 `timescale 1ns / 1ps
 
 module testbench;
@@ -1610,15 +1816,18 @@ module testbench;
     reg {clock};
     {chr(10).join(f"    reg {r['name']};" for r in resets) if resets else '    // no reset port detected'}
 
-    // Inputs (driven by LFSR)
+    // Inputs driven by the golden reactive environment
     {chr(10).join(f"    reg {port['width']+' ' if port['width'] else ''}{port['name']};" for port in regular_inputs) if regular_inputs else '    // No regular inputs'}
 
-    // Outputs from both designs
-    {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}golden_{port['name']};" for port in outputs) if outputs else '    // No outputs to compare'}
-    {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}revised_{port['name']};" for port in outputs) if outputs else ''}
+    // Outputs from golden design
+    {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}golden_{port['name']};" for port in outputs) if outputs else '    // No outputs to record'}
 
-    // LFSR for pseudo-random input generation
-    reg [31:0] lfsr = 32'hDEADBEEF;
+    reg [31:0] lfsr;
+    integer cycle_count;
+    integer num_vectors;
+    integer trace_fd;
+    reg [1023:0] trace_file;
+    reg trace_phase;
 
     // Reactive environment state
 {generate_env_declarations()}
@@ -1628,18 +1837,11 @@ module testbench;
         {build_port_connections("golden_")}
     );
 
-    // Instantiate revised design
-    {revised_module} revised_dut (
-        {build_port_connections("revised_")}
-    );
-
-    // Clock generation (10ns period = 100MHz)
     initial begin
         {clock} = 0;
         forever #5 {clock} = ~{clock};
     end
 
-    // LFSR update function
     function [31:0] lfsr_next;
         input [31:0] lfsr_in;
         begin
@@ -1648,11 +1850,108 @@ module testbench;
     endfunction
 {dsp_instr_fn}
 {generate_hls_mem_model_code()}
-    // Test stimulus and checking
+
+    initial begin
+        cycle_count = 0;
+        num_vectors = {self.num_vectors};
+        if (!$value$plusargs("NUM_VECTORS=%d", num_vectors)) begin
+            num_vectors = {self.num_vectors};
+        end
+        if (!$value$plusargs("TRACE_FILE=%s", trace_file)) begin
+            trace_file = "{trace_filename}";
+        end
+        if (!$value$plusargs("LFSR_SEED=%h", lfsr)) begin
+            lfsr = 32'hDEADBEEF;
+        end
+        trace_fd = $fopen(trace_file, "w");
+        if (trace_fd == 0) begin
+            $display("ERROR: Could not open trace file %0s", trace_file);
+            $finish(2);
+        end
+        $display("Configured test vectors: %0d", num_vectors);
+        $display("Writing golden trace: %0s", trace_file);
+{generate_env_init_code()}
+
+        {all_reset_assert_lines if resets else '// no reset port detected'}
+        {chr(10).join(f"        {port['name']} = 0;" for port in regular_inputs)}
+        repeat(10) @(posedge {clock});
+        {all_reset_deassert_lines if resets else ''}
+
+        repeat(50) begin
+            @(negedge {clock});
+            lfsr = lfsr_next(lfsr);
+{generate_negedge_stimulus_code()}
+            @(posedge {clock});
+{generate_posedge_bookkeeping_code()}
+            #1;
+{trace_write_code(0)}
+        end
+
+        repeat(num_vectors) begin
+            @(negedge {clock});
+            lfsr = lfsr_next(lfsr);
+{generate_negedge_stimulus_code()}
+
+            @(posedge {clock});
+            cycle_count = cycle_count + 1;
+{generate_posedge_bookkeeping_code()}
+            #1;
+{trace_write_code(1)}
+        end
+
+        $fclose(trace_fd);
+        $display("\\n=======================================");
+        $display("SIMULATION COMPLETE");
+        $display("=======================================");
+        $display("Cycles simulated: %0d", cycle_count);
+        $display("Mismatches found: 0");
+        $display("Protocol mismatches found: 0");
+        $display("Result: PASS");
+        $finish(0);
+    end
+
+    initial begin
+        #1;
+        #((10 + 50 + num_vectors) * 20) $display("ERROR: Simulation timeout"); $finish(2);
+    end
+{icache_force_block}
+endmodule
+"""
+
+        revised_replay_tb_content = f"""
+`timescale 1ns / 1ps
+
+module testbench;
+
+    // Clock and reset
+    reg {clock};
+    {chr(10).join(f"    reg {r['name']};" for r in resets) if resets else '    // no reset port detected'}
+
+    // Inputs replayed from golden trace
+    {chr(10).join(f"    reg {port['width']+' ' if port['width'] else ''}{port['name']};" for port in regular_inputs) if regular_inputs else '    // No regular inputs'}
+
+    // Outputs from revised design
+    {chr(10).join(f"    wire {port['width']+' ' if port['width'] else ''}revised_{port['name']};" for port in outputs) if outputs else '    // No outputs to compare'}
+
+{trace_expected_declarations()}
+
     integer mismatch_count;
     integer protocol_mismatch_count;
     integer cycle_count;
     integer num_vectors;
+    integer trace_fd;
+    integer trace_status;
+    reg [1023:0] trace_file;
+
+    // Instantiate revised design
+    {revised_module} revised_dut (
+        {build_port_connections("revised_")}
+    );
+
+    initial begin
+        {clock} = 0;
+        forever #5 {clock} = ~{clock};
+    end
 
     initial begin
         mismatch_count = 0;
@@ -1662,51 +1961,41 @@ module testbench;
         if (!$value$plusargs("NUM_VECTORS=%d", num_vectors)) begin
             num_vectors = {self.num_vectors};
         end
+        if (!$value$plusargs("TRACE_FILE=%s", trace_file)) begin
+            trace_file = "{trace_filename}";
+        end
+        trace_fd = $fopen(trace_file, "r");
+        if (trace_fd == 0) begin
+            $display("ERROR: Could not open trace file %0s", trace_file);
+            $finish(2);
+        end
         $display("Configured test vectors: %0d", num_vectors);
-{generate_env_init_code()}
+        $display("Replaying golden trace: %0s", trace_file);
 
-        // Reset (all reset-like ports driven together)
         {all_reset_assert_lines if resets else '// no reset port detected'}
         {chr(10).join(f"        {port['name']} = 0;" for port in regular_inputs)}
         repeat(10) @(posedge {clock});
         {all_reset_deassert_lines if resets else ''}
 
-        // Warm-up period: fill pipeline without checking outputs.
-        // Drive inputs on the inactive edge so sequential logic sees stable
-        // values before the active clock edge.
         repeat(50) begin
             @(negedge {clock});
-            lfsr = lfsr_next(lfsr);
-{generate_negedge_stimulus_code()}
+{trace_read_code(0)}
             @(posedge {clock});
-{generate_posedge_bookkeeping_code()}
             #1;
-{generate_protocol_compare_code()}
+{generate_replay_protocol_compare_code()}
         end
 
-        // Run test vectors with output checking
         repeat(num_vectors) begin
-            // Generate new inputs from LFSR
             @(negedge {clock});
-            lfsr = lfsr_next(lfsr);
-{generate_negedge_stimulus_code()}
-
-            // Sample outputs on the following active edge
+{trace_read_code(1)}
             @(posedge {clock});
             cycle_count = cycle_count + 1;
-{generate_posedge_bookkeeping_code()}
-
-            // Check outputs after settling
-            #1; // Small delay for output settling
-
-            // Compare all outputs
-{compare_body}
-
-            // Compare protocol outputs that drive the reactive environment
-{generate_protocol_compare_code()}
+            #1;
+{generate_replay_output_compare_code()}
+{generate_replay_protocol_compare_code()}
         end
 
-        // Report results
+        $fclose(trace_fd);
         $display("\\n=======================================");
         $display("SIMULATION COMPLETE");
         $display("=======================================");
@@ -1722,18 +2011,21 @@ module testbench;
         end
     end
 
-    // Timeout watchdog (reset + warmup + test cycles, with 2x safety margin)
     initial begin
         #1;
         #((10 + 50 + num_vectors) * 20) $display("ERROR: Simulation timeout"); $finish(2);
     end
-{icache_force_block}
 endmodule
 """
-        
+
+        if mode == "golden_trace":
+            tb_content = golden_trace_tb_content
+        else:
+            tb_content = revised_replay_tb_content
+
         with open(tb_path, 'w') as f:
             f.write(tb_content)
-        
+
         logger.info(f"Generated testbench: {tb_path}")
 
     @staticmethod
@@ -1766,24 +2058,511 @@ endmodule
             and 'BoomCore' in golden_verilog_text
         )
 
+    def _resolve_vivado_path(self) -> str:
+        vivado_path = os.environ.get("VIVADO_EXEC")
+        if vivado_path:
+            if "/" not in vivado_path:
+                vivado_path = shutil.which(vivado_path)
+        else:
+            vivado_path = shutil.which("vivado")
+        if not vivado_path:
+            raise RuntimeError("Vivado not found in PATH. Set VIVADO_EXEC env var or add Vivado to PATH.")
+        return vivado_path
+
+    @staticmethod
+    def _vivado_tool_env(vivado_path: str) -> dict:
+        """Return an environment that lets XSim kernels find Vivado runtime libs."""
+        env = os.environ.copy()
+        vivado_install = Path(vivado_path).parent.parent
+        lib_dir = vivado_install / "lib" / "lnx64.o"
+        if lib_dir.exists():
+            existing = env.get("LD_LIBRARY_PATH", "")
+            parts = [str(lib_dir)]
+            if existing:
+                parts.append(existing)
+            env["LD_LIBRARY_PATH"] = ":".join(parts)
+        return env
+
+    @staticmethod
+    def _rename_revised_verilog(revised_v: Path, revised_info: dict, revised_renamed: Path):
+        with open(revised_v, 'r') as f:
+            content = f.read()
+
+        declared_module_names = set(re.findall(
+            r'(?m)^\s*module\s+(\w+)\b',
+            content
+        ))
+        logger.info(
+            f"Found {len(declared_module_names)} module declarations in revised netlist"
+        )
+
+        if declared_module_names:
+            renamed_lines = []
+            suffix = "_revised"
+            for line in content.splitlines(keepends=True):
+                s = line.lstrip()
+                if not s:
+                    renamed_lines.append(line); continue
+                sp = s.find(' ')
+                tab = s.find('\t')
+                if tab != -1 and (sp == -1 or tab < sp):
+                    sp = tab
+                if sp == -1:
+                    renamed_lines.append(line); continue
+                first = s[:sp]
+                if first == 'module':
+                    rest = s[sp:].lstrip()
+                    nm = re.match(r'(\w+)', rest)
+                    if nm and nm.group(1) in declared_module_names:
+                        name = nm.group(1)
+                        indent = line[:len(line) - len(s)]
+                        after_name = len(s) - len(rest) + len(name)
+                        renamed_lines.append(
+                            indent + 'module ' + name + suffix + s[after_name:]
+                        )
+                        continue
+                elif first in declared_module_names:
+                    indent = line[:len(line) - len(s)]
+                    renamed_lines.append(
+                        indent + first + suffix + s[len(first):]
+                    )
+                    continue
+                renamed_lines.append(line)
+            content = ''.join(renamed_lines)
+
+        with open(revised_renamed, 'w') as f:
+            f.write(content)
+
+    def _run_trace_replay_simulation(
+        self,
+        golden_v: Path,
+        revised_v: Path,
+        golden_info: dict,
+        revised_info: dict,
+        golden_clocks: list,
+    ):
+        """Run phase 2 as cached golden trace generation plus revised replay."""
+        print("\nRunning xsim simulation...")
+        print("(Golden trace is reusable across revised DCPs for this golden design.)")
+
+        vivado_path = self._resolve_vivado_path()
+        vivado_env = self._vivado_tool_env(vivado_path)
+        vivado_bin_dir = Path(vivado_path).parent
+        vivado_install = vivado_bin_dir.parent
+        unisim_dir = vivado_install / "data" / "verilog" / "src"
+        glbl_v = unisim_dir / "glbl.v"
+
+        xvlog_timeout_s = 1800
+        xelab_timeout_s = 3600
+
+        def xsim_timeout_for(vector_count: int) -> int:
+            return max(3600, 600 + int(vector_count * 1.0))
+
+        golden_tb = self.temp_dir / "golden_trace_tb.v"
+        replay_tb = self.temp_dir / "revised_replay_tb.v"
+        trace_file = self.temp_dir / f"golden_trace_{self.num_vectors}.hex"
+
+        self.generate_testbench(
+            golden_info,
+            revised_info,
+            golden_tb,
+            clock_names=golden_clocks,
+            mode="golden_trace",
+            trace_filename=str(trace_file),
+        )
+        self.generate_testbench(
+            golden_info,
+            revised_info,
+            replay_tb,
+            clock_names=golden_clocks,
+            mode="revised_replay",
+            trace_filename=str(trace_file),
+        )
+
+        def compile_and_elaborate(
+            work_dir: Path,
+            sources: list,
+            snapshot: str,
+            top: str = "work.testbench",
+        ):
+            work_dir.mkdir(exist_ok=True)
+            compile_cmd = ["xvlog", "-work", "work"]
+            if glbl_v.exists():
+                compile_cmd.append(str(glbl_v))
+            compile_cmd.extend(sources)
+
+            result = subprocess.run(
+                compile_cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=xvlog_timeout_s,
+            )
+            if result.returncode != 0:
+                print("\n✗ Compilation failed:")
+                print(result.stdout)
+                print(result.stderr)
+                return False
+
+            elab_cmd = [
+                "xelab",
+                "--debug", "off",
+                "--mt", "auto",
+                "-L", "unisims_ver",
+                "-L", "unimacro_ver",
+                top,
+                "work.glbl",
+                "-s", snapshot,
+            ]
+            result = subprocess.run(
+                elab_cmd,
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=xelab_timeout_s,
+            )
+            if result.returncode != 0:
+                error_output = result.stdout + result.stderr
+                if self._is_encrypted_ip_error(error_output):
+                    logger.info("Elaboration failed due to encrypted/SIP IP")
+                    return {
+                        "status": "skipped",
+                        "reason": "Design contains encrypted or Secure IP blocks",
+                        "details": "xelab elaboration failed due to missing SIP modules",
+                    }
+                print("\n✗ Elaboration failed:")
+                print(result.stdout)
+                print(result.stderr)
+                return False
+            return True
+
+        def run_snapshot(work_dir: Path, snapshot: str, vector_count: int, label: str, trace_path: Path, use_lfsr_seed: bool = False) -> dict:
+            logger.info(f"Running {label} simulation with xsim ({vector_count} vectors)...")
+            sim_cmd = [
+                "xsim",
+                snapshot,
+                "-R",
+                "--testplusarg", f"NUM_VECTORS={vector_count}",
+                "--testplusarg", f"TRACE_FILE={trace_path}",
+            ]
+            if use_lfsr_seed:
+                sim_cmd += ["--testplusarg", f"LFSR_SEED={self.lfsr_seed:08X}"]
+
+            # The xsim kernel occasionally throws a load-time fault
+            # ("unexpected exception when evaluating tcl command") before the
+            # simulation even starts (no "run -all"/completion output). This is
+            # a transient runtime/resource failure of the simulator, not a
+            # design or testbench problem: re-running the identical snapshot
+            # succeeds. Retry a bounded number of times so a healthy DUT is not
+            # spuriously reported as an infrastructure failure.
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                result = subprocess.run(
+                    sim_cmd,
+                    cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    env=vivado_env,
+                    timeout=xsim_timeout_for(vector_count),
+                )
+                sim_output = result.stdout + result.stderr
+                transient_load_crash = (
+                    "unexpected exception when evaluating tcl command" in sim_output
+                    and "SIMULATION COMPLETE" not in sim_output
+                )
+                if not transient_load_crash or attempt == max_attempts:
+                    break
+                logger.warning(
+                    f"xsim {label} run hit a transient load-time fault "
+                    f"(attempt {attempt}/{max_attempts}); retrying..."
+                )
+                time.sleep(2 * attempt)
+
+            log_file = self.temp_dir / f"simulation_{label}.log"
+            with open(log_file, "w") as f:
+                f.write(sim_output)
+            if label == "full":
+                with open(self.temp_dir / "simulation.log", "w") as f:
+                    f.write(sim_output)
+            parse_result = parse_simulation_output(sim_output, result.returncode, vector_count)
+            for line in sim_output.split('\n'):
+                if 'MISMATCH' in line:
+                    print(f"  {line}")
+            return {
+                "vectors_requested": vector_count,
+                "cycles_simulated": parse_result["cycles_simulated"],
+                "mismatch_count": parse_result["mismatch_count"],
+                "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
+                "log_file": str(log_file),
+                "result_pass_seen": parse_result["result_pass_seen"],
+                "result_fail_seen": parse_result["result_fail_seen"],
+                "simulator_failed": parse_result["simulator_failed"],
+                "infrastructure_failure": parse_result["infrastructure_failure"],
+                "infrastructure_reason": parse_result["infrastructure_reason"],
+                "returncode": parse_result["returncode"],
+                "passed": parse_result["passed"],
+            }
+
+        current_step = "trace_replay_setup"
+        try:
+            current_step = "golden_trace_elaboration"
+            golden_key, golden_manifest = self._trace_simulation_cache_key(vivado_path, "golden_trace")
+            golden_cache_entry = self.sim_cache_dir / "golden_trace" / golden_key[:2] / golden_key
+            golden_xsim_dir = self.temp_dir / "xsim_golden_trace"
+            golden_cache_hit = False
+            if self.use_sim_cache:
+                try:
+                    golden_cache_hit = self._restore_cached_xsim_work(
+                        golden_cache_entry,
+                        golden_xsim_dir,
+                    )
+                except Exception as e:
+                    logger.warning(f"Unable to restore golden trace xsim cache; rebuilding: {e}")
+            if golden_cache_hit:
+                logger.info(f"Reusing cached golden trace xelab snapshot: {golden_cache_entry}")
+                print(f"✓ Reusing cached golden trace xelab snapshot: {golden_key[:12]}")
+            else:
+                print("Compiling/elaborating reusable golden trace snapshot...")
+                result = compile_and_elaborate(
+                    golden_xsim_dir,
+                    [str(golden_v), str(golden_tb)],
+                    "golden_trace_sim",
+                )
+                if isinstance(result, dict) or result is False:
+                    return result
+                if self.use_sim_cache:
+                    try:
+                        self._store_cached_xsim_work(golden_cache_entry, golden_xsim_dir, golden_manifest)
+                    except Exception as e:
+                        logger.warning(f"Unable to store golden trace xsim cache; continuing: {e}")
+
+            cached_trace = (
+                golden_cache_entry
+                / "traces"
+                / f"seed_{self.lfsr_seed:08X}_vectors_{self.num_vectors}.hex"
+            )
+            trace_cache_hit = False
+            if self.use_sim_cache and cached_trace.exists():
+                try:
+                    shutil.copy2(cached_trace, trace_file)
+                    trace_cache_hit = True
+                    print(
+                        f"✓ Reusing cached golden trace: {golden_key[:12]} "
+                        f"seed=0x{self.lfsr_seed:08X} vectors={self.num_vectors}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Unable to restore golden trace file cache; regenerating: {e}")
+            if not trace_cache_hit:
+                current_step = "golden_trace_generation"
+                print(f"Generating golden trace ({self.num_vectors} vectors)...")
+                golden_report = run_snapshot(
+                    golden_xsim_dir,
+                    "golden_trace_sim",
+                    self.num_vectors,
+                    "golden_trace",
+                    trace_file,
+                    use_lfsr_seed=True,
+                )
+                if not golden_report["passed"] or not trace_file.exists():
+                    self.infrastructure_failure = True
+                    self.infrastructure_reason = golden_report.get("infrastructure_reason") or "golden_trace_failed"
+                    self.simulation_report = {
+                        "golden_trace_report": golden_report,
+                        "infrastructure_failure": True,
+                        "infrastructure_reason": self.infrastructure_reason,
+                    }
+                    return False
+                if self.use_sim_cache:
+                    try:
+                        cached_trace.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(trace_file, cached_trace)
+                    except Exception as e:
+                        logger.warning(f"Unable to store golden trace file cache; continuing: {e}")
+
+            current_step = "revised_replay_elaboration"
+            revised_key, revised_manifest = self._trace_simulation_cache_key(vivado_path, "revised_replay")
+            revised_cache_entry = self.sim_cache_dir / "revised_replay" / revised_key[:2] / revised_key
+            revised_xsim_dir = self.temp_dir / "xsim_revised_replay"
+            revised_cache_hit = False
+            if self.use_sim_cache:
+                try:
+                    revised_cache_hit = self._restore_cached_xsim_work(
+                        revised_cache_entry,
+                        revised_xsim_dir,
+                    )
+                except Exception as e:
+                    logger.warning(f"Unable to restore revised replay xsim cache; rebuilding: {e}")
+            if revised_cache_hit:
+                logger.info(f"Reusing cached revised replay xelab snapshot: {revised_cache_entry}")
+                print(f"✓ Reusing cached revised replay xelab snapshot: {revised_key[:12]}")
+            else:
+                revised_xsim_dir.mkdir(exist_ok=True)
+                revised_renamed = revised_xsim_dir / "revised_sim_renamed.v"
+                logger.info("Renaming all revised modules to avoid conflicts...")
+                self._rename_revised_verilog(revised_v, revised_info, revised_renamed)
+                print("Compiling/elaborating revised replay snapshot...")
+                result = compile_and_elaborate(
+                    revised_xsim_dir,
+                    [str(revised_renamed), str(replay_tb)],
+                    "revised_replay_sim",
+                )
+                if isinstance(result, dict) or result is False:
+                    return result
+                if self.use_sim_cache:
+                    try:
+                        self._store_cached_xsim_work(revised_cache_entry, revised_xsim_dir, revised_manifest)
+                    except Exception as e:
+                        logger.warning(f"Unable to store revised replay xsim cache; continuing: {e}")
+
+            def print_report(report: dict, label: str):
+                print("\n" + "-"*70)
+                print(f"Simulation Results ({label}):")
+                print(f"  Requested vectors: {report['vectors_requested']}")
+                print(f"  Cycles: {report['cycles_simulated']}")
+                print(f"  Mismatches: {report['mismatch_count']}")
+                print(f"  Protocol mismatches: {report['protocol_mismatch_count']}")
+                print(f"  Log: {report['log_file']}")
+                if report["simulator_failed"]:
+                    print("  Simulator reported an internal failure")
+                if not report["result_pass_seen"] and report["returncode"] == 0:
+                    print("  Testbench PASS marker not found")
+                print(f"  Result: {'PASSED' if report['passed'] else 'FAILED'}")
+                print("-"*70)
+
+            precheck_report = None
+            run_precheck = self.precheck_vectors > 0 and self.precheck_vectors < self.num_vectors
+            if run_precheck:
+                current_step = "precheck_simulation"
+                print(f"\nSimulating {self.precheck_vectors} test vectors (precheck)...")
+                precheck_report = run_snapshot(
+                    revised_xsim_dir,
+                    "revised_replay_sim",
+                    self.precheck_vectors,
+                    "precheck",
+                    trace_file,
+                )
+                print_report(precheck_report, "precheck")
+                if not precheck_report["passed"]:
+                    self.simulation_report = {
+                        "mode": "golden_trace_revised_replay",
+                        "precheck_vectors": self.precheck_vectors,
+                        "precheck_passed": False,
+                        "precheck_report": precheck_report,
+                        "full_vectors": self.num_vectors,
+                        "full_run_skipped": True,
+                        "cycles_simulated": precheck_report["cycles_simulated"],
+                        "mismatch_count": precheck_report["mismatch_count"],
+                        "protocol_mismatch_count": precheck_report["protocol_mismatch_count"],
+                        "log_file": precheck_report["log_file"],
+                        "result_pass_seen": precheck_report["result_pass_seen"],
+                        "result_fail_seen": precheck_report["result_fail_seen"],
+                        "simulator_failed": precheck_report["simulator_failed"],
+                        "infrastructure_failure": precheck_report["infrastructure_failure"],
+                        "infrastructure_reason": precheck_report["infrastructure_reason"],
+                        "returncode": precheck_report["returncode"],
+                    }
+                    if precheck_report["infrastructure_failure"]:
+                        self.infrastructure_failure = True
+                        self.infrastructure_reason = precheck_report["infrastructure_reason"]
+                    self.phase2_passed = False
+                    if self.infrastructure_failure:
+                        print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (precheck crashed or did not complete; full run skipped)")
+                    else:
+                        print("\nPhase 2: FAILED ✗ (precheck failed; full run skipped)")
+                    return False
+
+            current_step = "full_simulation"
+            print(f"\nSimulating {self.num_vectors} test vectors (full)...")
+            full_report = run_snapshot(
+                revised_xsim_dir,
+                "revised_replay_sim",
+                self.num_vectors,
+                "full",
+                trace_file,
+            )
+            print_report(full_report, "full")
+
+            self.simulation_report = {
+                "mode": "golden_trace_revised_replay",
+                "precheck_vectors": self.precheck_vectors if run_precheck else None,
+                "precheck_passed": precheck_report["passed"] if precheck_report else None,
+                "precheck_report": precheck_report,
+                "full_vectors": self.num_vectors,
+                "full_report": full_report,
+                "cycles_simulated": full_report["cycles_simulated"],
+                "mismatch_count": full_report["mismatch_count"],
+                "protocol_mismatch_count": full_report["protocol_mismatch_count"],
+                "log_file": str(self.temp_dir / "simulation.log"),
+                "result_pass_seen": full_report["result_pass_seen"],
+                "result_fail_seen": full_report["result_fail_seen"],
+                "simulator_failed": full_report["simulator_failed"],
+                "infrastructure_failure": full_report["infrastructure_failure"],
+                "infrastructure_reason": full_report["infrastructure_reason"],
+                "returncode": full_report["returncode"],
+            }
+            self.phase2_passed = full_report["passed"]
+            if full_report["infrastructure_failure"]:
+                self.infrastructure_failure = True
+                self.infrastructure_reason = full_report["infrastructure_reason"]
+
+            if self.phase2_passed:
+                print("\nPhase 2: PASSED ✓")
+            elif self.infrastructure_failure:
+                print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘")
+            else:
+                print("\nPhase 2: FAILED ✗")
+            return self.phase2_passed
+
+        except subprocess.TimeoutExpired as e:
+            timeout_s = getattr(e, "timeout", "?")
+            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            logger.error(f"subprocess.TimeoutExpired during '{current_step}' (timeout={timeout_s}s)")
+            self.infrastructure_failure = True
+            self.infrastructure_reason = f"timeout_in_{current_step}"
+            self.simulation_report = {
+                "mode": "golden_trace_revised_replay",
+                "infrastructure_failure": True,
+                "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
+                "timeout_seconds": timeout_s,
+            }
+            return False
+
+        except Exception as e:
+            # Setup/runtime failures (e.g. missing xvlog/xelab/xsim, filesystem
+            # or cache errors, unexpected subprocess errors) are infrastructure
+            # problems that should be retried, not treated as a design FAIL.
+            print(f"\n✗ Simulation error in {current_step}: {e}")
+            logger.exception(f"Error during trace/replay step '{current_step}'")
+            self.infrastructure_failure = True
+            self.infrastructure_reason = f"exception_in_{current_step}"
+            self.simulation_report = {
+                "mode": "golden_trace_revised_replay",
+                "infrastructure_failure": True,
+                "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
+                "error": str(e),
+            }
+            return False
+
     async def phase2_functional_simulation(self) -> bool:
         """Phase 2: Functional simulation comparison."""
         print("\n" + "="*70)
         print("PHASE 2: FUNCTIONAL SIMULATION")
         print("="*70)
-        
+
         # Export Verilog simulation models
         golden_v = self.temp_dir / "golden_sim.v"
         revised_v = self.temp_dir / "revised_sim.v"
-        
+
         print("\nExporting simulation models...")
-        
+
         # Open golden DCP
         logger.info(f"Opening golden DCP: {self.golden_dcp}")
         result = await self.vivado_session.call_tool("open_checkpoint", {
             "dcp_path": str(self.golden_dcp.resolve())
         })
-        
+
         # Export golden as Verilog
         logger.info("Exporting golden to Verilog...")
         result = await self.vivado_session.call_tool("write_verilog_simulation", {
@@ -1791,7 +2570,7 @@ endmodule
             "force": True
         })
         print(f"✓ Golden model exported: {golden_v.name}")
-        
+
         # Query clock ports while the golden design is still loaded - more
         # robust than guessing from Verilog port names downstream.
         golden_clocks = await self._query_clock_ports_from_vivado()
@@ -1799,13 +2578,13 @@ endmodule
             logger.info(f"Vivado reports golden clock ports: {golden_clocks}")
         else:
             logger.info("Vivado reported no clocks for golden design (will fall back to name heuristic)")
-        
+
         # Open revised DCP
         logger.info(f"Opening revised DCP: {self.revised_dcp}")
         result = await self.vivado_session.call_tool("open_checkpoint", {
             "dcp_path": str(self.revised_dcp.resolve())
         })
-        
+
         # Export revised as Verilog
         logger.info("Exporting revised to Verilog...")
         result = await self.vivado_session.call_tool("write_verilog_simulation", {
@@ -1834,7 +2613,7 @@ endmodule
 
         print(f"Golden module: {golden_info['module_name']}")
         print(f"Revised module: {revised_info['module_name']}")
-        
+
         # Show port details with bit widths
         print(f"\nPort Information:")
         print(f"  Inputs ({len(golden_info['ports']['inputs'])}):")
@@ -1845,400 +2624,19 @@ endmodule
         for port in golden_info['ports']['outputs']:
             width_str = f" {port['width']}" if port['width'] else ""
             print(f"    - {port['name']}{width_str}")
-        
-        # Generate testbench
-        tb_path = self.temp_dir / "testbench.v"
-        print(f"\nGenerating testbench ({self.num_vectors} random vectors)...")
-        self.generate_testbench(
-            golden_info, revised_info, tb_path,
-            clock_names=golden_clocks,
+
+        return self._run_trace_replay_simulation(
+            golden_v,
+            revised_v,
+            golden_info,
+            revised_info,
+            golden_clocks,
         )
-        print(f"✓ Testbench generated: {tb_path.name}")
-        
-        # Run xsim simulation
-        print("\nRunning xsim simulation...")
-        print("(This may take a few minutes...)")
-        
-        xsim_dir = self.temp_dir / "xsim_work"
-        xsim_dir.mkdir(exist_ok=True)
-        
-        current_step = "setup"
-        try:
-            # Get Vivado installation path for simulation libraries
-            # Check VIVADO_EXEC environment variable first, then PATH
-            vivado_path = os.environ.get("VIVADO_EXEC")
-            if vivado_path:
-                # If VIVADO_EXEC is just the name (not a path), search in PATH
-                if '/' not in vivado_path:
-                    vivado_path = shutil.which(vivado_path)
-            else:
-                vivado_path = shutil.which("vivado")
-            if not vivado_path:
-                raise RuntimeError("Vivado not found in PATH. Set VIVADO_EXEC env var or add Vivado to PATH.")
-            
-            # Vivado sim lib is at: $XILINX_VIVADO/data/verilog/src/
-            vivado_bin_dir = Path(vivado_path).parent
-            vivado_install = vivado_bin_dir.parent
-            unisim_dir = vivado_install / "data" / "verilog" / "src"
-            
-            if not unisim_dir.exists():
-                logger.warning(f"UNISIM library not found at {unisim_dir}, trying glbl.v only")
-            
-            # To avoid module name conflicts, rename ALL modules in revised file
-            # (both declarations AND instantiations of those modules) so that the
-            # renamed-revised top is a self-contained design that doesn't silently
-            # link against golden sub-modules at elaboration time.
-            logger.info("Renaming all revised modules to avoid conflicts...")
-            revised_renamed = xsim_dir / "revised_sim_renamed.v"
-            
-            with open(revised_v, 'r') as f:
-                content = f.read()
-            
-            revised_module_name = revised_info["module_name"]
-            revised_module_renamed = f"{revised_module_name}_revised"
-            
-            # Pass 1: collect every declared module name in the revised netlist.
-            # Vivado's funcsim output is regular: each declaration starts with
-            # "module <name>" at the start of a line.
-            declared_module_names = set(re.findall(
-                r'(?m)^\s*module\s+(\w+)\b',
-                content
-            ))
-            logger.info(
-                f"Found {len(declared_module_names)} module declarations in revised netlist"
-            )
-            
-            # Pass 2: per-line scan rewriting both declarations and instantiations
-            # of declared modules to use the "_revised" suffix. We use a per-line
-            # scan with set-membership lookups (O(file size)) rather than a giant
-            # alternation regex, which is intractably slow on big benchmarks
-            # (e.g. corescore_500_mod has ~6700 user modules in a 71 MB netlist).
-            #
-            # Lines we care about in Vivado funcsim output:
-            #   "  module NAME"               -> declaration to rename
-            #   "  NAME inst_name (..."       -> instantiation to rename
-            # Anything else (port lists, assigns, wires, comments, primitives
-            # like LUT6/FDRE which are NOT in declared_module_names) is left alone.
-            if declared_module_names:
-                renamed_lines = []
-                suffix = "_revised"
-                for line in content.splitlines(keepends=True):
-                    s = line.lstrip()
-                    if not s:
-                        renamed_lines.append(line); continue
-                    sp = s.find(' ')
-                    tab = s.find('\t')
-                    if tab != -1 and (sp == -1 or tab < sp):
-                        sp = tab
-                    if sp == -1:
-                        renamed_lines.append(line); continue
-                    first = s[:sp]
-                    if first == 'module':
-                        rest = s[sp:].lstrip()
-                        nm = re.match(r'(\w+)', rest)
-                        if nm and nm.group(1) in declared_module_names:
-                            name = nm.group(1)
-                            indent = line[:len(line) - len(s)]
-                            after_name = len(s) - len(rest) + len(name)
-                            renamed_lines.append(
-                                indent + 'module ' + name + suffix + s[after_name:]
-                            )
-                            continue
-                    elif first in declared_module_names:
-                        indent = line[:len(line) - len(s)]
-                        renamed_lines.append(
-                            indent + first + suffix + s[len(first):]
-                        )
-                        continue
-                    renamed_lines.append(line)
-                content = ''.join(renamed_lines)
-            
-            with open(revised_renamed, 'w') as f:
-                f.write(content)
-            
-            # Compile Verilog files
-            logger.info("Compiling with xvlog...")
-            compile_cmd = [
-                "xvlog",
-                "-work", "work",
-                str(golden_v),
-                str(revised_renamed),
-                str(tb_path)
-            ]
-            
-            # Add UNISIM glbl if available
-            if unisim_dir.exists():
-                glbl_v = unisim_dir / "glbl.v"
-                if glbl_v.exists():
-                    compile_cmd.insert(3, str(glbl_v))
-            
-            # Timeouts are generous because large benchmarks (e.g. corescore_500_mod
-            # with thousands of user modules) can take many minutes per step.
-            # xvlog/xelab times scale with design size; xsim time scales with both
-            # design size and num_vectors.
-            xvlog_timeout_s = 1800   # 30 min
-            xelab_timeout_s = 3600   # 60 min - elaborates both designs
-            # xsim: per-cycle cost is roughly proportional to the number of
-            # primitive cells. Two copies of a 100k-LUT design (e.g.
-            # corescore_500_mod) measured ~0.3s/cycle. We add a generous baseline
-            # for kernel init and cap below by 60 min so small designs still get
-            # a comfortable budget.
-            def xsim_timeout_for(vector_count: int) -> int:
-                return max(3600, 600 + int(vector_count * 1.0))
-            
-            current_step = "xvlog (compilation)"
-            result = subprocess.run(
-                compile_cmd,
-                cwd=xsim_dir,
-                capture_output=True,
-                text=True,
-                timeout=xvlog_timeout_s
-            )
-            
-            if result.returncode != 0:
-                print(f"\n✗ Compilation failed:")
-                print(result.stdout)
-                print(result.stderr)
-                return False
-            
-            print("✓ Compilation successful")
-            
-            # Elaborate with UNISIM library reference.
-            #
-            # We pass "--debug off" because the testbench reports results via
-            # $display; we never inspect waveforms, so the per-signal debug
-            # instrumentation that "-debug typical" enables is pure overhead
-            # (relevant for smaller benchmarks where it dominates).
-            #
-            # "--mt auto" lets xelab parallelise where it can; it is a no-op for
-            # the per-module compile loop on huge designs but doesn't hurt.
-            logger.info("Elaborating with xelab...")
-            elab_cmd = [
-                "xelab",
-                "--debug", "off",
-                "--mt", "auto",
-                "-L", "unisims_ver",  # Link against UNISIM library
-                "-L", "unimacro_ver",
-                "work.testbench",  # Specify library.module
-                "work.glbl",       # Include glbl for initialization
-                "-s", "testbench_sim"
-            ]
-            
-            current_step = "xelab (elaboration)"
-            result = subprocess.run(
-                elab_cmd,
-                cwd=xsim_dir,
-                capture_output=True,
-                text=True,
-                timeout=xelab_timeout_s
-            )
-            
-            if result.returncode != 0:
-                # Check if failure is due to encrypted/SIP IP
-                error_output = result.stdout + result.stderr
-                if self._is_encrypted_ip_error(error_output):
-                    logger.info("Elaboration failed due to encrypted/SIP IP")
-                    print("\n" + "="*70)
-                    print("⚠ PHASE 2 SKIPPED")
-                    print("="*70)
-                    print("\nReason: Design contains encrypted or Secure IP blocks")
-                    print("        (e.g., PCIe, GTY transceivers) that cannot be")
-                    print("        simulated without vendor-specific libraries.")
-                    print("\nStructural checks (Phase 1) are still valid.")
-                    print("="*70 + "\n")
-                    return {
-                        "status": "skipped",
-                        "reason": "Design contains encrypted or Secure IP blocks",
-                        "details": "xelab elaboration failed due to missing SIP modules"
-                    }
-                
-                print(f"\n✗ Elaboration failed:")
-                print(result.stdout)
-                print(result.stderr)
-                return False
-            
-            print("✓ Elaboration successful")
-            
-            def run_xsim(vector_count: int, label: str) -> dict:
-                logger.info(f"Running {label} simulation with xsim ({vector_count} vectors)...")
-                print(f"\nSimulating {vector_count} test vectors ({label})...")
 
-                sim_cmd = [
-                    "xsim",
-                    "testbench_sim",
-                    "-R",
-                    "--testplusarg", f"NUM_VECTORS={vector_count}",
-                ]
-
-                result = subprocess.run(
-                    sim_cmd,
-                    cwd=xsim_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=xsim_timeout_for(vector_count)
-                )
-
-                sim_output = result.stdout + result.stderr
-
-                log_file = self.temp_dir / f"simulation_{label}.log"
-                with open(log_file, 'w') as f:
-                    f.write(sim_output)
-
-                if label == "full":
-                    # Preserve the historical log path for scripts/users that
-                    # expect a single final simulation.log.
-                    final_log = self.temp_dir / "simulation.log"
-                    with open(final_log, 'w') as f:
-                        f.write(sim_output)
-
-                parse_result = parse_simulation_output(
-                    sim_output,
-                    result.returncode,
-                    vector_count,
-                )
-
-                for line in sim_output.split('\n'):
-                    if 'MISMATCH' in line:
-                        print(f"  {line}")
-
-                report = {
-                    "vectors_requested": vector_count,
-                    "cycles_simulated": parse_result["cycles_simulated"],
-                    "mismatch_count": parse_result["mismatch_count"],
-                    "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
-                    "log_file": str(log_file),
-                    "result_pass_seen": parse_result["result_pass_seen"],
-                    "result_fail_seen": parse_result["result_fail_seen"],
-                    "simulator_failed": parse_result["simulator_failed"],
-                    "infrastructure_failure": parse_result["infrastructure_failure"],
-                    "infrastructure_reason": parse_result["infrastructure_reason"],
-                    "returncode": parse_result["returncode"],
-                    "passed": parse_result["passed"],
-                }
-
-                print("\n" + "-"*70)
-                print(f"Simulation Results ({label}):")
-                print(f"  Requested vectors: {vector_count}")
-                print(f"  Cycles: {parse_result['cycles_simulated']}")
-                print(f"  Mismatches: {parse_result['mismatch_count']}")
-                print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
-                print(f"  Log: {log_file}")
-                if parse_result["simulator_failed"]:
-                    print("  Simulator reported an internal failure")
-                if not parse_result["result_pass_seen"] and result.returncode == 0:
-                    print("  Testbench PASS marker not found")
-                print(f"  Result: {'PASSED' if parse_result['passed'] else 'FAILED'}")
-                print("-"*70)
-
-                return report
-
-            current_step = "xsim (precheck simulation)"
-            precheck_report = None
-            run_precheck = (
-                self.precheck_vectors > 0
-                and self.precheck_vectors < self.num_vectors
-            )
-            if run_precheck:
-                precheck_report = run_xsim(self.precheck_vectors, "precheck")
-                if not precheck_report["passed"]:
-                    self.simulation_report = {
-                        "precheck_vectors": self.precheck_vectors,
-                        "precheck_passed": False,
-                        "precheck_report": precheck_report,
-                        "full_vectors": self.num_vectors,
-                        "full_run_skipped": True,
-                        "cycles_simulated": precheck_report["cycles_simulated"],
-                        "mismatch_count": precheck_report["mismatch_count"],
-                        "protocol_mismatch_count": precheck_report["protocol_mismatch_count"],
-                        "log_file": precheck_report["log_file"],
-                        "result_pass_seen": precheck_report["result_pass_seen"],
-                        "result_fail_seen": precheck_report["result_fail_seen"],
-                        "simulator_failed": precheck_report["simulator_failed"],
-                        "infrastructure_failure": precheck_report["infrastructure_failure"],
-                        "infrastructure_reason": precheck_report["infrastructure_reason"],
-                        "returncode": precheck_report["returncode"],
-                    }
-                    if precheck_report["infrastructure_failure"]:
-                        self.infrastructure_failure = True
-                        self.infrastructure_reason = precheck_report["infrastructure_reason"]
-                    self.phase2_passed = False
-                    if self.infrastructure_failure:
-                        print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (precheck crashed or did not complete; full run skipped)")
-                    else:
-                        print("\nPhase 2: FAILED ✗ (precheck failed; full run skipped)")
-                    return False
-
-            current_step = "xsim (full simulation)"
-            full_report = run_xsim(self.num_vectors, "full")
-
-            self.simulation_report = {
-                "precheck_vectors": self.precheck_vectors if run_precheck else None,
-                "precheck_passed": precheck_report["passed"] if precheck_report else None,
-                "precheck_report": precheck_report,
-                "full_vectors": self.num_vectors,
-                "full_report": full_report,
-                "cycles_simulated": full_report["cycles_simulated"],
-                "mismatch_count": full_report["mismatch_count"],
-                "protocol_mismatch_count": full_report["protocol_mismatch_count"],
-                "log_file": str(self.temp_dir / "simulation.log"),
-                "result_pass_seen": full_report["result_pass_seen"],
-                "result_fail_seen": full_report["result_fail_seen"],
-                "simulator_failed": full_report["simulator_failed"],
-                "infrastructure_failure": full_report["infrastructure_failure"],
-                "infrastructure_reason": full_report["infrastructure_reason"],
-                "returncode": full_report["returncode"],
-            }
-
-            # Check if passed. xsim can report an internal simulator failure
-            # while still returning 0, so require the testbench's explicit
-            # completion marker and expected cycle count.
-            self.phase2_passed = full_report["passed"]
-            if full_report["infrastructure_failure"]:
-                self.infrastructure_failure = True
-                self.infrastructure_reason = full_report["infrastructure_reason"]
-
-            if self.phase2_passed:
-                print("\nPhase 2: PASSED ✓")
-            elif self.infrastructure_failure:
-                print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘")
-            else:
-                print("\nPhase 2: FAILED ✗")
-            
-            return self.phase2_passed
-            
-        except subprocess.TimeoutExpired as e:
-            timeout_s = getattr(e, "timeout", "?")
-            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
-            logger.error(
-                f"subprocess.TimeoutExpired in step '{current_step}' "
-                f"(timeout={timeout_s}s)"
-            )
-            self.infrastructure_failure = True
-            self.infrastructure_reason = f"timeout_in_{current_step}"
-            self.simulation_report = {
-                "infrastructure_failure": True,
-                "infrastructure_reason": self.infrastructure_reason,
-                "stage": current_step,
-                "timeout_seconds": timeout_s,
-            }
-            return False
-        except Exception as e:
-            print(f"\n✗ Simulation error in {current_step}: {e}")
-            logger.exception(f"Error in step '{current_step}'")
-            self.infrastructure_failure = True
-            self.infrastructure_reason = f"exception_in_{current_step}"
-            self.simulation_report = {
-                "infrastructure_failure": True,
-                "infrastructure_reason": self.infrastructure_reason,
-                "stage": current_step,
-                "error": str(e),
-            }
-            return False
-    
     async def validate(self) -> bool:
         """Run complete validation (both phases)."""
         start_time = time.time()
-        
+
         print("\n" + "="*70)
         print("DCP EQUIVALENCE VALIDATION")
         print("="*70)
@@ -2248,19 +2646,38 @@ endmodule
         if 0 < self.precheck_vectors < self.num_vectors:
             print(f"Precheck vectors: {self.precheck_vectors}")
         print("="*70)
-        
+
         # Phase 1: Structural checks
         phase1_passed = await self.phase1_structural_checks()
-        
+
         if not phase1_passed:
             print("\n⚠ Skipping Phase 2 due to Phase 1 failures")
             elapsed = time.time() - start_time
             self.print_final_report(elapsed)
             return False
-        
+
         # Phase 2: Functional simulation
-        phase2_result = await self.phase2_functional_simulation()
-        
+        try:
+            phase2_result = await self.phase2_functional_simulation()
+        except Exception as e:
+            # Catch-all for Phase 2 setup/runtime errors (model export, Vivado
+            # resolution, testbench generation, etc.) that occur outside the
+            # trace/replay handler. These are infrastructure failures (retry),
+            # not a definitive design FAIL, so surface them as such instead of
+            # letting them bubble up to main() as a generic fatal error.
+            logger.exception(f"Fatal error during Phase 2: {e}")
+            print(f"\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (unexpected error: {e})")
+            self.infrastructure_failure = True
+            if not self.infrastructure_reason:
+                self.infrastructure_reason = f"exception_in_phase2:{type(e).__name__}"
+            if not self.simulation_report:
+                self.simulation_report = {
+                    "infrastructure_failure": True,
+                    "infrastructure_reason": self.infrastructure_reason,
+                    "error": str(e),
+                }
+            phase2_result = False
+
         # Handle skipped phase2 (e.g., encrypted IP)
         if isinstance(phase2_result, dict) and phase2_result.get("status") == "skipped":
             self.phase2_skipped = True
@@ -2273,7 +2690,7 @@ endmodule
         self.print_final_report(elapsed)
 
         return phase1_passed and phase2_passed
-    
+
     def print_final_report(self, elapsed_time: float):
         """Print final validation report."""
         print("\n" + "="*70)
@@ -2283,7 +2700,7 @@ endmodule
         print(f"Revised DCP: {self.revised_dcp.name}")
         print(f"Runtime:     {elapsed_time:.1f} seconds ({elapsed_time/60:.1f} minutes)")
         print()
-        
+
         print("Phase 1 (Structural): " + ("PASSED ✓" if self.phase1_passed else "FAILED ✗"))
         if self.structural_report:
             checks_passed = self.structural_report.get("checks_passed", 0)
@@ -2292,7 +2709,7 @@ endmodule
             issues = self.structural_report.get("issues", [])
             if issues:
                 print(f"  Issues: {len(issues)}")
-        
+
         print()
         if self.phase2_skipped:
             print("Phase 2 (Simulation): SKIPPED ⊘")
@@ -2331,7 +2748,7 @@ endmodule
             overall_result = "PASSED ✓" if (self.phase1_passed and self.phase2_passed) else "FAILED ✗"
         print(f"Overall Result: {overall_result}")
         print("="*70)
-        
+
         # Save detailed report
         report_file = self.temp_dir / "validation_report.json"
         report = {
@@ -2339,6 +2756,7 @@ endmodule
             "revised_dcp": str(self.revised_dcp),
             "num_vectors": self.num_vectors,
             "precheck_vectors": self.precheck_vectors,
+            "lfsr_seed": f"0x{self.lfsr_seed:08X}",
             "runtime_seconds": elapsed_time,
             "phase1_passed": self.phase1_passed,
             "phase2_passed": self.phase2_passed,
@@ -2349,15 +2767,20 @@ endmodule
             "structural_report": self.structural_report,
             "simulation_report": self.simulation_report,
         }
-        
+
         with open(report_file, 'w') as f:
             json.dump(report, f, indent=2)
-        
+
         print(f"\nDetailed report saved: {report_file}")
         print(f"Working directory preserved: {self.temp_dir}")
-    
+
     async def cleanup(self):
         """Clean up resources."""
+        try:
+            from VivadoMCP import vivado_mcp_server as vivado_server
+            vivado_server.cleanup_vivado()
+        except Exception:
+            pass
         await self.exit_stack.aclose()
 
 
@@ -2402,18 +2825,38 @@ Examples:
         action="store_true",
         help="Disable reactive stimulus generation (use pure LFSR randomness)"
     )
+    parser.add_argument(
+        "--seed",
+        type=lambda x: int(x, 0),
+        default=None,
+        metavar="SEED",
+        help="32-bit LFSR seed for reproducible stimulus (hex or decimal, e.g. 0xDEADBEEF). "
+             "Defaults to a random value from /dev/urandom."
+    )
+    parser.add_argument(
+        "--no-sim-cache",
+        action="store_true",
+        help="Disable reuse of successful xelab snapshots"
+    )
+    parser.add_argument(
+        "--sim-cache-dir",
+        type=Path,
+        default=None,
+        help="Directory for cached xsim/xelab snapshots "
+             "(default: .xsim_validation_cache)"
+    )
 
     args = parser.parse_args()
-    
+
     # Validate inputs
     if not args.golden_dcp.exists():
         print(f"Error: Golden DCP not found: {args.golden_dcp}", file=sys.stderr)
         sys.exit(1)
-    
+
     if not args.revised_dcp.exists():
         print(f"Error: Revised DCP not found: {args.revised_dcp}", file=sys.stderr)
         sys.exit(1)
-    
+
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -2424,7 +2867,11 @@ Examples:
     if args.precheck_vectors < 0:
         print("Error: --precheck-vectors must be non-negative", file=sys.stderr)
         sys.exit(1)
-    
+
+    if args.seed is not None and not (0 <= args.seed <= 0xFFFFFFFF):
+        print("Error: --seed must be a 32-bit unsigned integer (0 to 0xFFFFFFFF)", file=sys.stderr)
+        sys.exit(1)
+
     # Run validation
     validator = DCPValidator(
         golden_dcp=args.golden_dcp,
@@ -2432,17 +2879,20 @@ Examples:
         num_vectors=args.vectors,
         precheck_vectors=args.precheck_vectors,
         debug=args.debug,
-        no_reactive=args.no_reactive
+        no_reactive=args.no_reactive,
+        use_sim_cache=not args.no_sim_cache,
+        sim_cache_dir=args.sim_cache_dir,
+        lfsr_seed=args.seed,
     )
-    
+
     try:
         await validator.start_servers()
         success = await validator.validate()
-        
+
         if validator.infrastructure_failure:
             sys.exit(2)
         sys.exit(0 if success else 1)
-        
+
     except KeyboardInterrupt:
         print("\n\nValidation interrupted by user")
         sys.exit(130)
