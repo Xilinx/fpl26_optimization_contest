@@ -1288,7 +1288,13 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
         # Summary - only count real issues (not INFO)
         real_issues = [i for i in issues if not i.startswith("INFO:")]
         all_checks_passed = (checks_passed == checks_total)
-        
+
+        # Cell counts are reported for information only; they are intentionally
+        # NOT part of the pass/fail checks above (the cell-count check was
+        # removed because optimization legitimately changes cell counts).
+        golden_cell_count = golden.getCells().size()
+        revised_cell_count = revised.getCells().size()
+
         result = {
             "status": "success",
             "comparison_result": "PASS" if all_checks_passed else "FAIL",

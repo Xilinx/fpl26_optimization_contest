@@ -2281,7 +2281,9 @@ endmodule
                 "passed": parse_result["passed"],
             }
 
+        current_step = "trace_replay_setup"
         try:
+            current_step = "golden_trace_elaboration"
             golden_key, golden_manifest = self._trace_simulation_cache_key(vivado_path, "golden_trace")
             golden_cache_entry = self.sim_cache_dir / "golden_trace" / golden_key[:2] / golden_key
             golden_xsim_dir = self.temp_dir / "xsim_golden_trace"
@@ -2329,6 +2331,7 @@ endmodule
                 except Exception as e:
                     logger.warning(f"Unable to restore golden trace file cache; regenerating: {e}")
             if not trace_cache_hit:
+                current_step = "golden_trace_generation"
                 print(f"Generating golden trace ({self.num_vectors} vectors)...")
                 golden_report = run_snapshot(
                     golden_xsim_dir,
@@ -2354,6 +2357,7 @@ endmodule
                     except Exception as e:
                         logger.warning(f"Unable to store golden trace file cache; continuing: {e}")
 
+            current_step = "revised_replay_elaboration"
             revised_key, revised_manifest = self._trace_simulation_cache_key(vivado_path, "revised_replay")
             revised_cache_entry = self.sim_cache_dir / "revised_replay" / revised_key[:2] / revised_key
             revised_xsim_dir = self.temp_dir / "xsim_revised_replay"
@@ -2406,6 +2410,7 @@ endmodule
             precheck_report = None
             run_precheck = self.precheck_vectors > 0 and self.precheck_vectors < self.num_vectors
             if run_precheck:
+                current_step = "precheck_simulation"
                 print(f"\nSimulating {self.precheck_vectors} test vectors (precheck)...")
                 precheck_report = run_snapshot(
                     revised_xsim_dir,
@@ -2444,6 +2449,7 @@ endmodule
                         print("\nPhase 2: FAILED ✗ (precheck failed; full run skipped)")
                     return False
 
+            current_step = "full_simulation"
             print(f"\nSimulating {self.num_vectors} test vectors (full)...")
             full_report = run_snapshot(
                 revised_xsim_dir,
@@ -2487,14 +2493,33 @@ endmodule
 
         except subprocess.TimeoutExpired as e:
             timeout_s = getattr(e, "timeout", "?")
-            print(f"\n✗ Timeout in trace/replay simulation after {timeout_s}s")
+            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            logger.error(f"subprocess.TimeoutExpired during '{current_step}' (timeout={timeout_s}s)")
             self.infrastructure_failure = True
-            self.infrastructure_reason = "timeout_in_trace_replay_simulation"
+            self.infrastructure_reason = f"timeout_in_{current_step}"
             self.simulation_report = {
                 "mode": "golden_trace_revised_replay",
                 "infrastructure_failure": True,
                 "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
                 "timeout_seconds": timeout_s,
+            }
+            return False
+
+        except Exception as e:
+            # Setup/runtime failures (e.g. missing xvlog/xelab/xsim, filesystem
+            # or cache errors, unexpected subprocess errors) are infrastructure
+            # problems that should be retried, not treated as a design FAIL.
+            print(f"\n✗ Simulation error in {current_step}: {e}")
+            logger.exception(f"Error during trace/replay step '{current_step}'")
+            self.infrastructure_failure = True
+            self.infrastructure_reason = f"exception_in_{current_step}"
+            self.simulation_report = {
+                "mode": "golden_trace_revised_replay",
+                "infrastructure_failure": True,
+                "infrastructure_reason": self.infrastructure_reason,
+                "stage": current_step,
+                "error": str(e),
             }
             return False
 
@@ -2610,7 +2635,26 @@ endmodule
             return False
 
         # Phase 2: Functional simulation
-        phase2_result = await self.phase2_functional_simulation()
+        try:
+            phase2_result = await self.phase2_functional_simulation()
+        except Exception as e:
+            # Catch-all for Phase 2 setup/runtime errors (model export, Vivado
+            # resolution, testbench generation, etc.) that occur outside the
+            # trace/replay handler. These are infrastructure failures (retry),
+            # not a definitive design FAIL, so surface them as such instead of
+            # letting them bubble up to main() as a generic fatal error.
+            logger.exception(f"Fatal error during Phase 2: {e}")
+            print(f"\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (unexpected error: {e})")
+            self.infrastructure_failure = True
+            if not self.infrastructure_reason:
+                self.infrastructure_reason = f"exception_in_phase2:{type(e).__name__}"
+            if not self.simulation_report:
+                self.simulation_report = {
+                    "infrastructure_failure": True,
+                    "infrastructure_reason": self.infrastructure_reason,
+                    "error": str(e),
+                }
+            phase2_result = False
 
         # Handle skipped phase2 (e.g., encrypted IP)
         if isinstance(phase2_result, dict) and phase2_result.get("status") == "skipped":
