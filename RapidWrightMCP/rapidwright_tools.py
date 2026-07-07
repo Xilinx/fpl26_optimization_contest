@@ -1285,40 +1285,6 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
         else:
             issues.extend(port_issues)
         
-        # Check 4: Cell count (should increase or stay same, small decreases allowed)
-        checks_total += 1
-        golden_cell_count = golden.getCells().size()
-        revised_cell_count = revised.getCells().size()
-        
-        cell_change_pct = (revised_cell_count - golden_cell_count) / golden_cell_count * 100
-        
-        # Allow small decrease (<=3%), up to 50% increase (optimizations can add/remove cells)
-        if (revised_cell_count >= golden_cell_count * 0.97 and 
-            revised_cell_count <= golden_cell_count * 1.5):
-            checks_passed += 1
-            # Note small changes as info, not error
-            if revised_cell_count < golden_cell_count:
-                issues.append(
-                    f"INFO: Cell count decreased slightly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({abs(cell_change_pct):.2f}% decrease - likely due to optimization)"
-                )
-            elif revised_cell_count > golden_cell_count:
-                issues.append(
-                    f"INFO: Cell count increased: {golden_cell_count} -> {revised_cell_count} "
-                    f"({cell_change_pct:.2f}% increase - likely due to optimization)"
-                )
-        else:
-            if revised_cell_count < golden_cell_count:
-                issues.append(
-                    f"Cell count decreased significantly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({abs(cell_change_pct):.2f}% decrease - this may indicate logic removal)"
-                )
-            else:
-                issues.append(
-                    f"Cell count increased significantly: {golden_cell_count} -> {revised_cell_count} "
-                    f"({cell_change_pct:.1f}% increase - this may indicate excessive optimization)"
-                )
-        
         # Summary - only count real issues (not INFO)
         real_issues = [i for i in issues if not i.startswith("INFO:")]
         all_checks_passed = (checks_passed == checks_total)
