@@ -420,6 +420,71 @@ endmodule
         self.assertIn("function [31:0] dsp_rv32_instr;", tb)
         self.assertIn("Reactive request driver for mem_d", tb)
 
+    def test_boom_trace_testbenches_use_separate_elaboration_images(self):
+        validator = DCPValidator(
+            self.workspace / "golden.dcp",
+            self.workspace / "revised.dcp",
+            num_vectors=8,
+        )
+        try:
+            inputs = [
+                {"name": "clock_uncore_clock", "width": None},
+                {"name": "reset_io", "width": None},
+                {"name": "tl_slave_0_a_ready", "width": None},
+                {"name": "tl_slave_0_d_valid", "width": None},
+                {"name": "tl_slave_0_d_bits_data", "width": "[63:0]"},
+                {"name": "tl_slave_0_d_bits_source", "width": "[3:0]"},
+                {"name": "tl_slave_0_d_bits_size", "width": "[2:0]"},
+                {"name": "tl_slave_0_d_bits_opcode", "width": "[2:0]"},
+            ]
+            outputs = [
+                {"name": "tl_slave_0_d_ready", "width": None},
+                {"name": "tl_slave_0_a_bits_source", "width": "[3:0]"},
+                {"name": "tl_slave_0_a_bits_size", "width": "[2:0]"},
+                {"name": "uart_0_txd", "width": None},
+            ]
+            golden_info = {
+                "module_name": "ChipTop",
+                "ports": {"inputs": inputs, "outputs": outputs, "inouts": []},
+            }
+            revised_info = {
+                "module_name": "ChipTop",
+                "ports": {"inputs": inputs, "outputs": outputs, "inouts": []},
+            }
+            golden_tb = self.workspace / "golden_trace.v"
+            revised_tb = self.workspace / "revised_trace.v"
+            trace = self.workspace / "trace.txt"
+            validator.generate_boom_trace_testbenches(
+                golden_info, revised_info, golden_tb, revised_tb, trace,
+                clock_names=["clock_uncore_clock"])
+            golden_text = golden_tb.read_text()
+            revised_text = revised_tb.read_text()
+
+            self.assertIn("module golden_trace_testbench;", golden_text)
+            self.assertIn("ChipTop golden_dut", golden_text)
+            self.assertNotIn("revised_dut", golden_text)
+            self.assertIn('$fwrite(trace_fd, " %h", tl_slave_0_d_valid);',
+                          golden_text)
+            self.assertIn('$fwrite(trace_fd, " %h", golden_uart_0_txd);',
+                          golden_text)
+            self.assertIn('if (!$value$plusargs("NUM_VECTORS=%d", num_vectors))',
+                          golden_text)
+            self.assertIn("total_cycles = 50 + num_vectors;", golden_text)
+
+            self.assertIn("module revised_trace_testbench;", revised_text)
+            self.assertIn("ChipTop revised_dut", revised_text)
+            self.assertNotIn("golden_dut", revised_text)
+            self.assertIn('$fscanf(trace_fd, " %h", tl_slave_0_d_valid);',
+                          revised_text)
+            self.assertIn(
+                "MISMATCH AT cycle %0d: uart_0_txd golden=%h revised=%h",
+                revised_text)
+            self.assertIn('if (!$value$plusargs("NUM_VECTORS=%d", num_vectors))',
+                          revised_text)
+            self.assertIn("total_cycles = 50 + num_vectors;", revised_text)
+        finally:
+            shutil.rmtree(validator.temp_dir, ignore_errors=True)
+
     def test_tilelink_a_prefix_derived_from_suffix_not_first_occurrence(self):
         # A prefix like tile_dcache_d must become tile_dcache_a, not tile_acache_d.
         # The old replace('_d', '_a', 1) would corrupt the first _d in the prefix.
