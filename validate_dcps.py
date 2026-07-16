@@ -39,6 +39,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class BoomStageTimeout(RuntimeError):
+    """Timeout tagged with the exact sequential BOOM subprocess stage."""
+
+    def __init__(self, stage: str, timeout_seconds: int):
+        super().__init__(f"{stage} timed out after {timeout_seconds}s")
+        self.stage = stage
+        self.timeout_seconds = timeout_seconds
+
+
 def sanitize_identifier(name: str) -> str:
     """Convert an arbitrary interface prefix into a valid Verilog identifier."""
     ident = re.sub(r'[^0-9A-Za-z_]', '_', name)
@@ -2121,9 +2130,20 @@ endmodule
             return max(3600, 600 + int(vector_count * 1.0))
 
         def run_command(cmd, cwd: Path, timeout_s: int, log_name: str):
-            result = subprocess.run(
-                cmd, cwd=cwd, capture_output=True, text=True,
-                timeout=timeout_s)
+            try:
+                result = subprocess.run(
+                    cmd, cwd=cwd, capture_output=True, text=True,
+                    timeout=timeout_s)
+            except subprocess.TimeoutExpired as error:
+                stdout = error.stdout or ""
+                stderr = error.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode(errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode(errors="replace")
+                (self.temp_dir / log_name).write_text(stdout + stderr)
+                raise BoomStageTimeout(
+                    Path(log_name).stem, timeout_s) from error
             (self.temp_dir / log_name).write_text(
                 (result.stdout or "") + (result.stderr or ""))
             return result
@@ -2247,6 +2267,22 @@ endmodule
             print("\nPhase 2: FAILED ✗ (sequential Boom trace)")
         return self.phase2_passed
 
+    def _record_boom_stage_timeout(self, error: BoomStageTimeout) -> bool:
+        """Persist a stage-specific BOOM timeout as infrastructure."""
+        self.infrastructure_failure = True
+        self.infrastructure_reason = f"{error.stage}_timeout"
+        self.simulation_report = {
+            "strategy": "sequential_boom_trace",
+            "infrastructure_failure": True,
+            "infrastructure_reason": self.infrastructure_reason,
+            "timeout_stage": error.stage,
+            "timeout_seconds": error.timeout_seconds,
+        }
+        print(
+            f"\n✗ Timeout in sequential Boom stage {error.stage} "
+            f"after {error.timeout_seconds}s")
+        return False
+
     @staticmethod
     def _detect_icache_bootstrap(golden_verilog_text: str) -> Optional[dict]:
         """Detect VexRiscv InstructionCache — signals that burst iBus bootstrap is needed.
@@ -2369,18 +2405,8 @@ endmodule
                 return self._run_boom_trace_pair(
                     golden_v, revised_v, golden_info, revised_info,
                     golden_clocks)
-            except subprocess.TimeoutExpired as e:
-                timeout_s = getattr(e, "timeout", "?")
-                self.infrastructure_failure = True
-                self.infrastructure_reason = "timeout_in_boom_sequential_trace"
-                self.simulation_report = {
-                    "strategy": "sequential_boom_trace",
-                    "infrastructure_failure": True,
-                    "infrastructure_reason": self.infrastructure_reason,
-                    "timeout_seconds": timeout_s,
-                }
-                print(f"\n✗ Timeout in sequential Boom trace after {timeout_s}s")
-                return False
+            except BoomStageTimeout as e:
+                return self._record_boom_stage_timeout(e)
             except Exception as e:
                 self.infrastructure_failure = True
                 self.infrastructure_reason = "exception_in_boom_sequential_trace"
