@@ -457,6 +457,7 @@ endmodule
                     "outputs": list(reversed(outputs)),
                     "inouts": [],
                 },
+
             }
             golden_tb = self.workspace / "golden_trace.v"
             revised_tb = self.workspace / "revised_trace.v"

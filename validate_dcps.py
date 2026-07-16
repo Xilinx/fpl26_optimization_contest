@@ -1776,6 +1776,7 @@ endmodule
                 port_shape(revised_info["ports"]["inputs"]) or
                 port_shape(outputs) !=
                 port_shape(revised_info["ports"]["outputs"])):
+
             raise ValueError("Boom trace simulation requires matching top-level ports")
 
         clock_candidates = []
