@@ -1763,10 +1763,19 @@ endmodule
         # The structural phase already validates compatible interfaces. Keep a
         # clear local guard because a trace replay with different port names
         # would otherwise produce opaque xvlog errors.
-        if ([p["name"] for p in inputs] !=
-                [p["name"] for p in revised_info["ports"]["inputs"]] or
-                [p["name"] for p in outputs] !=
-                [p["name"] for p in revised_info["ports"]["outputs"]]):
+        def port_shape(ports):
+            return {
+                p["name"]: (p.get("width") or "")
+                for p in ports
+            }
+
+        # Vivado may emit the same top-level ports in a different declaration
+        # order after optimization. Connections and trace fields are generated
+        # by port name, so ordering is irrelevant; names and widths must match.
+        if (port_shape(inputs) !=
+                port_shape(revised_info["ports"]["inputs"]) or
+                port_shape(outputs) !=
+                port_shape(revised_info["ports"]["outputs"])):
             raise ValueError("Boom trace simulation requires matching top-level ports")
 
         clock_candidates = []

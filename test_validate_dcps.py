@@ -449,7 +449,14 @@ endmodule
             }
             revised_info = {
                 "module_name": "ChipTop",
-                "ports": {"inputs": inputs, "outputs": outputs, "inouts": []},
+                # Vivado is free to reorder top-level declarations between
+                # golden and revised funcsim exports. Name/width equivalence is
+                # what matters because generated connections are named.
+                "ports": {
+                    "inputs": list(reversed(inputs)),
+                    "outputs": list(reversed(outputs)),
+                    "inouts": [],
+                },
             }
             golden_tb = self.workspace / "golden_trace.v"
             revised_tb = self.workspace / "revised_trace.v"
