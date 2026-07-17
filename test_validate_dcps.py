@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from validate_dcps import (
+    BoomStageTimeout,
     DCPValidator,
     assign_from_seed,
     parse_simulation_output,
@@ -111,6 +112,35 @@ class SimulationParserTests(unittest.TestCase):
 
         self.assertFalse(parsed["passed"])
         self.assertTrue(parsed["simulator_failed"])
+
+
+class BoomTimeoutClassificationTests(unittest.TestCase):
+    def test_stage_specific_timeout_reason(self):
+        workspace = Path(tempfile.mkdtemp(prefix="boom_timeout_test_"))
+        validator = DCPValidator(
+            workspace / "golden.dcp",
+            workspace / "revised.dcp",
+            num_vectors=8,
+        )
+        try:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = validator._record_boom_stage_timeout(
+                    BoomStageTimeout("boom_golden_xelab", 3600))
+            self.assertFalse(result)
+            self.assertTrue(validator.infrastructure_failure)
+            self.assertEqual(
+                validator.infrastructure_reason,
+                "boom_golden_xelab_timeout")
+            self.assertEqual(
+                validator.simulation_report["timeout_stage"],
+                "boom_golden_xelab")
+            self.assertEqual(
+                validator.simulation_report["timeout_seconds"], 3600)
+            self.assertIn("boom_golden_xelab", output.getvalue())
+        finally:
+            shutil.rmtree(validator.temp_dir, ignore_errors=True)
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 class TestbenchGenerationTests(unittest.TestCase):
@@ -449,7 +479,15 @@ endmodule
             }
             revised_info = {
                 "module_name": "ChipTop",
-                "ports": {"inputs": inputs, "outputs": outputs, "inouts": []},
+                # Vivado is free to reorder top-level declarations between
+                # golden and revised funcsim exports. Name/width equivalence is
+                # what matters because generated connections are named.
+                "ports": {
+                    "inputs": list(reversed(inputs)),
+                    "outputs": list(reversed(outputs)),
+                    "inouts": [],
+                },
+
             }
             golden_tb = self.workspace / "golden_trace.v"
             revised_tb = self.workspace / "revised_trace.v"
