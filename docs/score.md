@@ -12,7 +12,7 @@ Teams will be scored as follows:
 2. For each benchmark rank all teams based on their score
    - If multiple teams achieve an identical score (e.g. `inf`) assign the same rank to each
 3. For each team compute the arithmetic mean of all rankings
-   - Higher mean ranking is better
+   - Lower mean ranking is better
 4. Sort teams by mean ranking, and assign prizes in ascending order
 
 > ℹ️ **NOTE**  

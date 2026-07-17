@@ -8,20 +8,20 @@ tables.
 ## Download
 
 The benchmark DCP files are available as a single archive from the
-[v1.1.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.1.0):
+[v1.2.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.2.0):
 
 | File | Size |
 |------|------|
-| [`fpl26_contest_benchmarks_v1.1.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.1.0/fpl26_contest_benchmarks_v1.1.0.tar.gz) | ~525 MB |
-| [`fpl26_contest_benchmarks_v1.1.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.1.0/fpl26_contest_benchmarks_v1.1.0.md5) | checksum |
+| [`fpl26_contest_benchmarks_v1.2.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.2.0/fpl26_contest_benchmarks_v1.2.0.tar.gz) | ~707 MB |
+| [`fpl26_contest_benchmarks_v1.2.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.2.0/fpl26_contest_benchmarks_v1.2.0.md5) | checksum |
 
 After downloading, extract the archive in the repository root:
 
 ```bash
-tar xzf fpl26_contest_benchmarks_v1.1.0.tar.gz
+tar xzf fpl26_contest_benchmarks_v1.2.0.tar.gz
 ```
 
-This creates a `fpl26_contest_benchmarks/` directory containing all 13 benchmark
+This creates a `fpl26_contest_benchmarks/` directory containing all 16 benchmark
 DCP files. Alternatively, `make setup` will download and extract the benchmarks
 automatically.
 
@@ -31,7 +31,9 @@ automatically.
 |----------------------|--------------|---:|--:|---:|----:|---------:|
 | [AMD](https://github.com/amd/mini-isp)                  |`amd_mini-isp`                                    |3k |4k |40  |12  |307  |
 | [BOOM](https://github.com/riscv-boom/riscv-boom)       |`boom_soc`                                    |227k |98k |61  |161  |48.2  |
+| [BOOM](https://github.com/riscv-boom/riscv-boom)       |`boom_soc_v2`                                 |227k |98k |61  |161  |77.2  |
 | [CoreScore](https://github.com/olofk/corescore)              |`corescore_500_mod`                               |100k |120k|0 |250  |344.2 |
+| AMD                                                     |`fir_systolic_transposed_routed`                  |— |— |456 |— |355.5 |
 | [FINN](https://github.com/Xilinx/finn)              |`finn_radioml`                               |74k |46k|0 |25  |284.9 |
 | [ISPD16](https://www.ispd.cc/contests/16/)              |`ispd16_example2`                               |289k |234k|200 |384  |107.6 |
 | [LogicNets](https://github.com/Xilinx/logicnets)       |`logicnets_jscl` (Jet Substructure Classification L)|31k  |2k  |0   |0    |403.6 |
@@ -42,12 +44,32 @@ automatically.
 | [VexRiscv](https://github.com/SpinalHDL/VexRiscv)      |`vexriscv_re-place`                               |2k   |1k  |4   |6    |310.2 |
 | [VexRiscv](https://github.com/SpinalHDL/VexRiscv)      |`vexriscv_re-place_v2` †                          |2k   |2k  |4   |4    |397.5 |
 | [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) |`vtr_mcml`                         |43k  |15k |105 |142  |62.2  |
+| [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) |`vtr_mcml_v2`                      |43k  |15k |105 |142  |69.3  |
 
 † `vexriscv_re-place_v2` was held back as a *hidden* benchmark during the alpha
 submission round and was not made available to contestants until after that
 round closed. It was released publicly as part of the
 [v1.1.0 benchmark archive](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.1.0)
 and is included in the suite for the remainder of the contest.
+
+## Benchmarks used for beta evaluation
+
+The beta submissions were evaluated on the following five benchmarks. The
+composition of this evaluation suite was not published until after the beta
+submission deadline on 13 July 2026.
+
+| Source | DCP filename | Fmax (MHz) |
+|--------|--------------|-----------:|
+| [AMD](https://github.com/amd/mini-isp) | `amd_mini-isp_2025.1.dcp` | 307.125 |
+| [BOOM](https://github.com/riscv-boom/riscv-boom) | `boom_soc_2025.1_v2.dcp` | 77.155 |
+| AMD | `fir_systolic_transposed_routed.dcp` | 355.492 |
+| [Rosetta](https://github.com/cornell-zhang/rosetta) | `rosetta_optical-flow_2025.1.dcp` | 324.886 |
+| [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) | `vtr_mcml_2025.1_v2.dcp` | 69.334 |
+
+The `amd_mini-isp` and `rosetta_optical-flow` DCPs are byte-identical to the
+versions that were already publicly available. The `boom_soc_v2`,
+`fir_systolic_transposed_routed`, and `vtr_mcml_v2` DCPs are newly published in
+the [v1.2.0 benchmark archive](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.2.0).
 
 
 ## Baseline Agent Results
@@ -120,4 +142,3 @@ domains, which may differ from the WNS on `clk_fpl26contest` in multi-clock
 designs. Tools and scripts should query WNS using `-to [get_clocks
 clk_fpl26contest]` to ensure the Fmax calculation reflects the correct clock
 domain. Fmax is calculated as `1000 / (period - WNS)` where WNS is negative.
-
