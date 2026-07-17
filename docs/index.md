@@ -38,8 +38,8 @@ More information can be found in [Contest Details](details.html).
 |-----------------|-------|
 | 23 February 2026    | Contest Announced |
 | ~23 March 2026~<br>**EXTENDED 3 April 2026** | Registration Deadline ([mandatory, see below](#registration))|
-| 5 May 2026          | Alpha Submission ([details](alpha_submission.html))|
-| 13 July 2026        | Beta Submission ([details](beta_submission.html))|
+| 5 May 2026          | Alpha Submission — closed; ([details](alpha_submission.html))|
+| 13 July 2026        | Beta Submission — closed; [rankings published](results.html) and [benchmarks released](benchmarks.html#benchmarks-used-for-beta-evaluation) ([details](beta_submission.html))|
 | 10 August 2026      | Final Submission ([details](final_submission.html))|
 | 6-10 September 2026 | Prizes awarded to top 5 teams at [FPL 2026 conference](https://2026.fpl.org/)|
 

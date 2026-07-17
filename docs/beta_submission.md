@@ -5,6 +5,8 @@ for beta evaluation have now been published on the
 [Benchmark Details](benchmarks.html#benchmarks-used-for-beta-evaluation) page
 and are included in the
 [v1.2.0 benchmark release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.2.0).
+The [top 21 beta rankings and results](results.html)
+are also available.
 
 The beta submission round evaluated team submissions that successfully passed the alpha submission.
 The beta submission scores will be used to determine the finalists who will progress onto making a final submission;
