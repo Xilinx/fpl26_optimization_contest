@@ -62,7 +62,7 @@ submission deadline on 13 July 2026.
 |--------|--------------|-----------:|
 | [AMD](https://github.com/amd/mini-isp) | `amd_mini-isp_2025.1.dcp` | 307.125 |
 | [BOOM](https://github.com/riscv-boom/riscv-boom) | `boom_soc_2025.1_v2.dcp` | 77.155 |
-| AMD | `fir_systolic_transposed_routed.dcp` | 355.492 |
+| AMD | `fir_systolic_transposed_routed_2025.1.dcp` | 355.492 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta) | `rosetta_optical-flow_2025.1.dcp` | 324.886 |
 | [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) | `vtr_mcml_2025.1_v2.dcp` | 69.334 |
 
