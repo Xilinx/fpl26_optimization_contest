@@ -6,7 +6,7 @@ Of the 48 teams competing before the beta deadline, 37 made beta submissions.
 The following table shows the top 21 teams from the FPL'26 beta evaluation.
 These 21 teams will proceed to the final round.
 
-Teams are ranked within each benchmark by descending mean rank, with identical
+Teams are ranked within each benchmark by descending score, with identical
 values tied. The overall ranking is determined by the ascending arithmetic mean
 of the five benchmark ranks. Standard competition ranking is used for ties
 (`1, 2, 2, 4`).
