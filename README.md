@@ -145,8 +145,8 @@ export CLASSPATH=$RAPIDWRIGHT_PATH/bin:$RAPIDWRIGHT_PATH/jars/*
 java -version
 
 # Download and extract benchmark DCPs
-wget https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.1.0/fpl26_contest_benchmarks_v1.1.0.tar.gz
-tar xzf fpl26_contest_benchmarks_v1.1.0.tar.gz
+wget https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.2.0/fpl26_contest_benchmarks_v1.2.0.tar.gz
+tar xzf fpl26_contest_benchmarks_v1.2.0.tar.gz
 ```
 
 **Important: Set JAVA_HOME**

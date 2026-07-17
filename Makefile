@@ -42,7 +42,7 @@ export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
 # Benchmark archive from GitHub release
-BENCHMARK_VERSION := v1.1.0
+BENCHMARK_VERSION := v1.2.0
 BENCHMARK_TARBALL := fpl26_contest_benchmarks_$(BENCHMARK_VERSION).tar.gz
 BENCHMARK_DIR := fpl26_contest_benchmarks
 BENCHMARK_URL := https://github.com/Xilinx/fpl26_optimization_contest/releases/download/$(BENCHMARK_VERSION)/$(BENCHMARK_TARBALL)

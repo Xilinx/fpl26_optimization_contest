@@ -1,7 +1,13 @@
 # Beta Submission
 
-The beta submission round will evaluate team submissions who successfully passed the alpha submission.
-The scores of the beta submission will be used to determine the finalists who will progress onto making a final submission;
+**The beta submission round closed on 13 July 2026.** The five benchmarks used
+for beta evaluation have now been published on the
+[Benchmark Details](benchmarks.html#benchmarks-used-for-beta-evaluation) page
+and are included in the
+[v1.2.0 benchmark release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.2.0).
+
+The beta submission round evaluated team submissions that successfully passed the alpha submission.
+The beta submission scores will be used to determine the finalists who will progress onto making a final submission;
 those teams will receive additional AWS and OpenRouter credits in preparation for the final submission.
 Contestants will receive private feedback from the organizers assessing the
 performance of just their submission on the released benchmark suite (plus a hidden
