@@ -1,7 +1,7 @@
 # FPGA Design Optimization Agent Dependencies
 
 # Core dependencies
-mcp>=1.0.0
+mcp==1.28.1
 
 # OpenAI client (only needed for full agent mode using OpenRouter, not test mode)
 openai>=1.0.0
