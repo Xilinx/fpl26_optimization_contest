@@ -7,37 +7,41 @@ tables.
 
 ## Download
 
-The benchmark DCP files are available as a single archive from the
-[v1.2.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.2.0):
+The complete benchmark set is available as a single archive from the
+[v1.3.0 release](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.3.0):
 
 | File | Size |
 |------|------|
-| [`fpl26_contest_benchmarks_v1.2.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.2.0/fpl26_contest_benchmarks_v1.2.0.tar.gz) | ~707 MB |
-| [`fpl26_contest_benchmarks_v1.2.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.2.0/fpl26_contest_benchmarks_v1.2.0.md5) | checksum |
+| [`fpl26_contest_benchmarks_v1.3.0.tar.gz`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.3.0/fpl26_contest_benchmarks_v1.3.0.tar.gz) | ~743 MB |
+| [`fpl26_contest_benchmarks_v1.3.0.md5`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.3.0/fpl26_contest_benchmarks_v1.3.0.md5) | MD5 checksum |
+| [`fpl26_contest_benchmarks_v1.3.0.sha256`](https://github.com/Xilinx/fpl26_optimization_contest/releases/download/v1.3.0/fpl26_contest_benchmarks_v1.3.0.sha256) | SHA-256 checksum |
 
 After downloading, extract the archive in the repository root:
 
 ```bash
-tar xzf fpl26_contest_benchmarks_v1.2.0.tar.gz
+tar xzf fpl26_contest_benchmarks_v1.3.0.tar.gz
 ```
 
-This creates a `fpl26_contest_benchmarks/` directory containing all 16 benchmark
+This creates a `fpl26_contest_benchmarks/` directory containing all 19 benchmark
 DCP files. Alternatively, `make setup` will download and extract the benchmarks
 automatically.
 
-## Benchmarks published during contest
+## Benchmarks published across contest releases
 
 |Source |Benchmark Name|LUTs|FFs|DSPs|BRAMs|Fmax (MHz)|
 |----------------------|--------------|---:|--:|---:|----:|---------:|
 | [AMD](https://github.com/amd/mini-isp)                  |`amd_mini-isp`                                    |3k |4k |40  |12  |307  |
+| [AMD](https://github.com/amd/mini-isp)                  |`amd_mini-isp_v2`                                 |3k |4k |40  |12  |288.0 |
 | [BOOM](https://github.com/riscv-boom/riscv-boom)       |`boom_soc`                                    |227k |98k |61  |161  |48.2  |
 | [BOOM](https://github.com/riscv-boom/riscv-boom)       |`boom_soc_v2`                                 |227k |98k |61  |161  |77.2  |
 | [CoreScore](https://github.com/olofk/corescore)              |`corescore_500_mod`                               |100k |120k|0 |250  |344.2 |
 | AMD                                                     |`fir_systolic_transposed_routed`                  |— |— |456 |— |355.5 |
+| AMD                                                     |`fir_symmetric_systolic_routed`                   |— |— |680 |— |405.7 |
 | [FINN](https://github.com/Xilinx/finn)              |`finn_radioml`                               |74k |46k|0 |25  |284.9 |
 | [ISPD16](https://www.ispd.cc/contests/16/)              |`ispd16_example2`                               |289k |234k|200 |384  |107.6 |
 | [LogicNets](https://github.com/Xilinx/logicnets)       |`logicnets_jscl` (Jet Substructure Classification L)|31k  |2k  |0   |0    |403.6 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_3d-rendering`                           |14k  |5k  |3   |0    |270.9 |
+| [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_3d-rendering_v2`                        |14k  |5k  |3   |0    |236.7 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_digit-recognition`                      |23k  |23k |0   |161  |367.0 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_optical-flow`                           |34k  |37k |42  |61   |324.9 |
 | [Rosetta](https://github.com/cornell-zhang/rosetta)     |`rosetta_spam-filter`                            |5k   |13k |224 |3    |437.4 |
@@ -104,7 +108,23 @@ most of their allotted time in place and route operations.
 
 ## Benchmarks used for final evaluation
 
-To be released after contest concludes.
+The final submissions were evaluated on the following seven hidden benchmarks.
+The complete final suite is published in the
+[v1.3.0 benchmark archive](https://github.com/Xilinx/fpl26_optimization_contest/releases/tag/v1.3.0).
+
+| Source | DCP filename | Input Fmax (MHz) | Release status |
+|--------|--------------|-----------------:|----------------|
+| [AMD](https://github.com/amd/mini-isp) | `amd_mini-isp_2025.1_v2.dcp` | 288.018 | New final benchmark |
+| [FINN](https://github.com/Xilinx/finn) | `finn_radioml_2025.1.dcp` | 284.900 | Previously released; byte-identical |
+| AMD | `fir_symmetric_systolic_routed_2025.1.dcp` | 405.680 | New final benchmark |
+| AMD | `fir_systolic_transposed_routed_2025.1.dcp` | 355.492 | Previously released; byte-identical |
+| [Rosetta](https://github.com/cornell-zhang/rosetta) | `rosetta_3d-rendering_2025.1_v2.dcp` | 236.686 | New final benchmark |
+| [Rosetta](https://github.com/cornell-zhang/rosetta) | `rosetta_digit-recognition_2025.1.dcp` | 366.972 | Previously released; byte-identical |
+| [VTR](https://github.com/verilog-to-routing/vtr-verilog-to-routing) | `vtr_mcml_2025.1_v2.dcp` | 69.334 | Previously released; byte-identical |
+
+The v1.3.0 archive is a strict superset of v1.2.0. It adds only the three
+final-unique DCPs listed above as "New final benchmark" and retains every
+previously released benchmark unchanged.
 
 
 ## Details
