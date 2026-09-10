@@ -1,5 +1,9 @@
 # Agentic FPGA Backend Optimization Competition  @ [FPL'26](https://2026.fpl.org/)
 
+> 🏆 **The contest has concluded!** Congratulations to our five finalists —
+> **AER**, **RouteAgents**, **ESCA**, **Fu_Do_Fdo**, and **MEEMAR**. See the
+> [final results, rankings, and team presentations](results.html#final-submission-results--rankings).
+
 ## The Challenge
 
 Given a fully placed and routed design checkpoint (DCP), create a new DCP that improves its maximum clock frequency (Fmax) as much as possible while maintaining logical equivalence and staying fully placed and routed.
@@ -40,8 +44,8 @@ More information can be found in [Contest Details](details.html).
 | ~23 March 2026~<br>**EXTENDED 3 April 2026** | Registration Deadline ([mandatory, see below](#registration))|
 | 5 May 2026          | Alpha Submission — closed; ([details](alpha_submission.html))|
 | 13 July 2026        | Beta Submission — closed; [rankings published](results.html) and [benchmarks released](benchmarks.html#benchmarks-used-for-beta-evaluation) ([details](beta_submission.html))|
-| 10 August 2026      | Final Submission ([details](final_submission.html))|
-| 6-10 September 2026 | Prizes awarded to top 5 teams at [FPL 2026 conference](https://2026.fpl.org/)|
+| 10 August 2026      | Final Submission — closed; ([details](final_submission.html))|
+| 6-10 September 2026 | **Prizes awarded to top 5 teams — [see winners & final results](results.html)** at [FPL 2026 conference](https://2026.fpl.org/)|
 
 Deadlines refer to Anywhere On Earth.
 

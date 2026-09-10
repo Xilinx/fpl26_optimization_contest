@@ -258,5 +258,296 @@ team can reproduce its mean benchmark rank.
 
 ## Final Submission Results & Rankings
 
-The contest is still ongoing. Final submission results and rankings will be
-published after the FPL 2026 conference.
+Final submissions were evaluated on the seven benchmarks described on
+the [Benchmarks](benchmarks.html#benchmarks-used-for-final-evaluation) page.
+As with the beta round, teams are ranked within each benchmark by descending
+score (standard competition ranking, `1, 2, 2, 4`), and the overall ranking is
+determined by the ascending arithmetic mean of the per-benchmark ranks. See
+the [Scoring Criteria](score.html) page for the full scoring formula.
+
+📄 The full results announcement and presentation from FPL 2026 is available
+here: [`2026-09-09-FPL26-Contest-Results.pdf`](assets/2026-09-09-FPL26-Contest-Results.pdf).
+
+## 🏆 Congratulations to the Winners! 🏆
+
+The following five teams placed highest in the final round and are the
+prize winners of the FPL'26 Agentic FPGA Backend Optimization Contest.
+Each finalist prepared a short slide and video summarizing their approach,
+included below.
+
+| Prize | Team | Mean rank | Highlight |
+|:---:|---|---:|---|
+| 🥇 1st — €3000 | **AER** | 4.286 | Best on FINN RadioML (rank 1) |
+| 🥈 2nd — €2000 | **RouteAgents** | 5.000 | Best on Rosetta Digit-Rec (rank 1) |
+| 🥉 3rd — €1000 | **ESCA** | 6.286 | Best on VTR MCML (rank 1) |
+| 4th — €500 | **Fu_Do_Fdo** | 7.429 | Best on FIR Symmetric (rank 1) |
+| 5th — €500 | **MEEMAR** | 7.714 | 2nd best on FINN RadioML |
+
+All five finalists have agreed to open
+source their submissions; repository links are provided below and will be
+updated as they are published.)*
+
+### 1st Place: AER
+
+![AER slide](assets/finalists/AER_slide.png)
+
+<video width="100%" controls preload="metadata">
+  <source src="assets/finalists/AER_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+**Open-source repository:** _TBD — coming soon_
+
+### 2nd Place: RouteAgents
+
+![RouteAgents slide](assets/finalists/RouteAgents_slide.png)
+
+<video width="100%" controls preload="metadata">
+  <source src="assets/finalists/RouteAgents_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+**Open-source repository:** [github.com/Geochatz3/routeagents-fpl26](https://github.com/Geochatz3/routeagents-fpl26)
+
+### 3rd Place: ESCA
+
+![ESCA slide](assets/finalists/ESCA_slide.png)
+
+<video width="100%" controls preload="metadata">
+  <source src="assets/finalists/ESCA_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+**Open-source repository:** _TBD — coming soon_
+
+### 4th Place: Fu_Do_Fdo
+
+![Fu_Do_Fdo slide](assets/finalists/Fu_Do_Fdo_slide.png)
+
+<video width="100%" controls preload="metadata">
+  <source src="assets/finalists/Fu_Do_Fdo_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+**Open-source repository:** _TBD — coming soon_
+
+### 5th Place: MEEMAR
+
+![MEEMAR slide](assets/finalists/MEEMAR_slide.png)
+
+<video width="100%" controls preload="metadata">
+  <source src="assets/finalists/MEEMAR_video.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+**Open-source repository:** [github.com/randomuzbek/meemar-fpl26-optimizer](https://github.com/randomuzbek/meemar-fpl26-optimizer)
+
+### Per-Benchmark Rankings
+
+The complete rankings for each final-round benchmark are provided below,
+restricted to the 24 official contest entrants. Teams are ranked within each
+benchmark by descending score, with standard competition ranking used for
+ties (`1, 2, 2, 4`).
+
+#### AMD Mini-ISP
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | Fmaximizers | 246.649 |
+| 2 | ESCA | 217.967 |
+| 3 | RouteAgents | 123.793 |
+| 4 | MEEMAR | 121.411 |
+| 5 | UTDA_FPGA | 121.131 |
+| 6 | Elios_Lab | 120.107 |
+| 7 | AER | 116.773 |
+| 8 | NanoLLM | 116.489 |
+| 9 | Berkeley_Gobblers | 116.136 |
+| 10 | Novi_CAD | 115.649 |
+| 11 | BSC-ANO | 114.533 |
+| 12 | LogicFlow | 113.779 |
+| 13 | Synthesis_Sages | 113.223 |
+| 14 | FLY_FPGA | 112.825 |
+| 15 | Net-Surgeon | 112.540 |
+| 16 | critpath | 112.387 |
+| 17 | CUFO | 110.929 |
+| 18 | OOM_Slayers | 107.587 |
+| 19 | nagar | 101.967 |
+| 20 | DaKaiMen | 100.766 |
+| 21 | ParaGato_Labs | 86.632 |
+| 22 | Fu_Do_Fdo | 78.776 |
+| 23 | Microprocessor_Lab | 0.000 |
+| 23 | Morpheus | 0.000 |
+
+#### FINN RadioML
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | AER | 62.454 |
+| 2 | MEEMAR | 61.409 |
+| 3 | Elios_Lab | 60.106 |
+| 4 | BSC-ANO | 59.780 |
+| 5 | RouteAgents | 59.025 |
+| 6 | CUFO | 58.342 |
+| 7 | Novi_CAD | 57.988 |
+| 8 | Net-Surgeon | 57.567 |
+| 9 | Fu_Do_Fdo | 56.871 |
+| 10 | ESCA | 56.694 |
+| 11 | nagar | 56.501 |
+| 12 | Synthesis_Sages | 55.342 |
+| 13 | ParaGato_Labs | 52.826 |
+| 14 | LogicFlow | 51.275 |
+| 15 | OOM_Slayers | 50.977 |
+| 16 | UTDA_FPGA | 50.513 |
+| 17 | FLY_FPGA | 49.404 |
+| 18 | critpath | 48.955 |
+| 19 | Fmaximizers | 46.062 |
+| 20 | Berkeley_Gobblers | 34.235 |
+| 21 | NanoLLM | 12.272 |
+| 22 | Morpheus | 11.862 |
+| 23 | DaKaiMen | 11.210 |
+| 24 | Microprocessor_Lab | 0.000 |
+
+#### FIR Symmetric
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | Fu_Do_Fdo | 53.055 |
+| 2 | AER | 53.014 |
+| 3 | Novi_CAD | 47.575 |
+| 4 | Fmaximizers | 45.039 |
+| 5 | Net-Surgeon | 39.194 |
+| 6 | RouteAgents | 34.662 |
+| 7 | DaKaiMen | 29.898 |
+| 8 | Synthesis_Sages | 29.783 |
+| 9 | NanoLLM | 27.573 |
+| 10 | LogicFlow | 27.211 |
+| 11 | CUFO | 23.405 |
+| 12 | nagar | 21.768 |
+| 13 | ESCA | 16.317 |
+| 14 | FLY_FPGA | 16.118 |
+| 15 | critpath | 15.636 |
+| 16 | ParaGato_Labs | 15.438 |
+| 17 | UTDA_FPGA | 15.382 |
+| 18 | MEEMAR | 7.702 |
+| 19 | Berkeley_Gobblers | 7.138 |
+| 20 | BSC-ANO | 0.000 |
+| 20 | Elios_Lab | 0.000 |
+| 20 | Microprocessor_Lab | 0.000 |
+| 20 | Morpheus | 0.000 |
+| 20 | OOM_Slayers | 0.000 |
+
+#### FIR Transposed
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | Fu_Do_Fdo | 42.809 |
+| 2 | ESCA | 42.092 |
+| 3 | Novi_CAD | 22.422 |
+| 4 | AER | 21.494 |
+| 5 | Morpheus | 19.686 |
+| 6 | RouteAgents | 19.482 |
+| 7 | Fmaximizers | 18.405 |
+| 8 | ParaGato_Labs | 18.197 |
+| 9 | Elios_Lab | 17.807 |
+| 10 | critpath | 17.007 |
+| 11 | MEEMAR | 16.836 |
+| 12 | CUFO | 16.556 |
+| 13 | UTDA_FPGA | 14.018 |
+| 14 | Net-Surgeon | 13.661 |
+| 15 | Synthesis_Sages | 11.745 |
+| 16 | FLY_FPGA | 11.463 |
+| 17 | OOM_Slayers | 10.643 |
+| 18 | LogicFlow | 9.907 |
+| 19 | BSC-ANO | 7.096 |
+| 20 | DaKaiMen | 5.469 |
+| 21 | nagar | 0.429 |
+| 22 | Berkeley_Gobblers | 0.000 |
+| 22 | Microprocessor_Lab | 0.000 |
+| 22 | NanoLLM | 0.000 |
+
+#### Rosetta 3D-Render
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | Fu_Do_Fdo | 77.643 |
+| 2 | LogicFlow | 60.786 |
+| 3 | Novi_CAD | 54.626 |
+| 4 | AER | 53.379 |
+| 5 | BSC-ANO | 53.158 |
+| 6 | ESCA | 51.275 |
+| 7 | MEEMAR | 50.720 |
+| 8 | Elios_Lab | 48.965 |
+| 9 | critpath | 45.329 |
+| 10 | Synthesis_Sages | 44.809 |
+| 11 | CUFO | 44.435 |
+| 12 | RouteAgents | 44.222 |
+| 13 | ParaGato_Labs | 44.187 |
+| 14 | Net-Surgeon | 40.912 |
+| 15 | OOM_Slayers | 40.524 |
+| 16 | UTDA_FPGA | 39.303 |
+| 17 | DaKaiMen | 36.714 |
+| 18 | Morpheus | 35.957 |
+| 19 | Fmaximizers | 33.876 |
+| 20 | FLY_FPGA | 29.392 |
+| 21 | nagar | 23.157 |
+| 22 | Berkeley_Gobblers | 1.576 |
+| 23 | Microprocessor_Lab | 0.000 |
+| 23 | NanoLLM | 0.000 |
+
+#### Rosetta Digit-Rec
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | RouteAgents | 84.048 |
+| 2 | BSC-ANO | 68.817 |
+| 3 | MEEMAR | 57.389 |
+| 4 | CUFO | 56.084 |
+| 5 | UTDA_FPGA | 52.908 |
+| 6 | ParaGato_Labs | 52.449 |
+| 7 | Fmaximizers | 51.911 |
+| 8 | DaKaiMen | 51.792 |
+| 9 | AER | 50.718 |
+| 10 | ESCA | 47.038 |
+| 11 | Fu_Do_Fdo | 46.031 |
+| 12 | FLY_FPGA | 43.651 |
+| 13 | Synthesis_Sages | 37.904 |
+| 14 | critpath | 33.035 |
+| 15 | Berkeley_Gobblers | 31.943 |
+| 16 | LogicFlow | 31.757 |
+| 17 | Morpheus | 30.550 |
+| 18 | nagar | 25.617 |
+| 19 | Net-Surgeon | 16.668 |
+| 20 | Elios_Lab | 14.671 |
+| 21 | Microprocessor_Lab | 0.000 |
+| 21 | NanoLLM | 0.000 |
+| 21 | Novi_CAD | 0.000 |
+| 21 | OOM_Slayers | 0.000 |
+
+#### VTR MCML
+
+| Rank | Team | Score |
+|---:|---|---:|
+| 1 | ESCA | 21.442 |
+| 2 | RouteAgents | 4.668 |
+| 3 | AER | 4.083 |
+| 4 | Morpheus | 4.023 |
+| 5 | Fmaximizers | 3.637 |
+| 6 | critpath | 3.303 |
+| 7 | Fu_Do_Fdo | 3.127 |
+| 8 | UTDA_FPGA | 2.936 |
+| 9 | MEEMAR | 2.787 |
+| 10 | CUFO | 2.585 |
+| 11 | OOM_Slayers | 2.365 |
+| 12 | nagar | 2.168 |
+| 13 | Elios_Lab | 2.147 |
+| 14 | Synthesis_Sages | 2.060 |
+| 15 | BSC-ANO | 1.954 |
+| 16 | LogicFlow | 1.874 |
+| 17 | Net-Surgeon | 1.735 |
+| 18 | ParaGato_Labs | 1.716 |
+| 19 | FLY_FPGA | 1.715 |
+| 20 | Novi_CAD | 1.710 |
+| 21 | DaKaiMen | 1.621 |
+| 22 | NanoLLM | 1.388 |
+| 23 | Berkeley_Gobblers | 0.599 |
+| 24 | Microprocessor_Lab | 0.000 |
