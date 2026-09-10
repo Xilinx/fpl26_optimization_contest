@@ -1,8 +1,9 @@
 # Agentic FPGA Backend Optimization Competition  @ [FPL'26](https://2026.fpl.org/)
 
-> 🏆 **The contest has concluded!** Congratulations to our five finalists —
+> ℹ️ **NOTE**
+> **The contest is now over.** Congratulations to our five finalists —
 > **AER**, **RouteAgents**, **ESCA**, **Fu_Do_Fdo**, and **MEEMAR**. See the
-> [final results, rankings, and team presentations](results.html#final-submission-results--rankings).
+> [final results, rankings, and team presentations](results.html).
 
 ## The Challenge
 
