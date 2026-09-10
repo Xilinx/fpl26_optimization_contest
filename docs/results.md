@@ -75,7 +75,7 @@ updated as they are published.)*
   Your browser does not support the video tag.
 </video>
 
-**Open-source repository:** _TBD — coming soon_
+**Open-source repository:** [https://github.com/FudanLLMEDA/PACT](https://github.com/FudanLLMEDA/PACT)
 
 ### 5th Place: MEEMAR
 
