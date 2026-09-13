@@ -64,7 +64,7 @@ updated as they are published.)*
   Your browser does not support the video tag.
 </video>
 
-**Open-source repository:** _TBD — coming soon_
+**Open-source repository:** [https://github.com/jun311k/fpl26_optimization_contest](https://github.com/jun311k/fpl26_optimization_contest)
 
 ### 4th Place: Fu_Do_Fdo
 
