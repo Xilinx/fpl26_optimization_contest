@@ -42,7 +42,7 @@ updated as they are published.)*
   Your browser does not support the video tag.
 </video>
 
-**Open-source repository:** _TBD — coming soon_
+**Open-source repository:** [https://github.com/haeun-josue/fpl26contest-AER-optimizer](https://github.com/haeun-josue/fpl26contest-AER-optimizer)
 
 ### 2nd Place: RouteAgents
 
